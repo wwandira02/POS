@@ -862,22 +862,22 @@ function renderPengaturan(){
     <div style="margin-bottom:20px;">
       <div style="font-weight:700;margin-bottom:8px;">Mode Tampilan</div>
       <div style="display:flex;gap:8px;">
-        <button class="tabbtn ${mode==='light'?'active':''}" data-mode="light" style="flex:1;">☀ Light</button>
-        <button class="tabbtn ${mode==='dark'?'active':''}" data-mode="dark" style="flex:1;">🌙 Dark</button>
+        <button class="tabbtn ${mode==='light'?'active':''}" data-setmode="light" style="flex:1;">☀ Light</button>
+        <button class="tabbtn ${mode==='dark'?'active':''}" data-setmode="dark" style="flex:1;">🌙 Dark</button>
       </div>
     </div>
     <div>
       <div style="font-weight:700;margin-bottom:10px;">Tema Warna</div>
       <div style="display:flex;gap:12px;flex-wrap:wrap;">
         ${THEMES.map(t=>`<div style="text-align:center;">
-          <div class="swatch ${theme===t.id?'active':''}" data-theme="${t.id}" style="background:${t.hex};margin:0 auto 4px;"></div>
+          <div class="swatch ${theme===t.id?'active':''}" data-settheme="${t.id}" style="background:${t.hex};margin:0 auto 4px;"></div>
           <div style="font-size:10.5px;color:var(--text-faint);">${t.name}</div>
         </div>`).join('')}
       </div>
     </div>
   </div>`;
-  document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_mode', b.dataset.mode); applyTheme(); renderPengaturan(); });
-  document.querySelectorAll('[data-theme]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_theme', b.dataset.theme); applyTheme(); renderPengaturan(); });
+  document.querySelectorAll('[data-setmode]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_mode', b.dataset.setmode); applyTheme(); renderPengaturan(); });
+  document.querySelectorAll('[data-settheme]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_theme', b.dataset.settheme); applyTheme(); renderPengaturan(); });
 }
 
 /* ---------------- INIT ---------------- */
