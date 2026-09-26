@@ -187,6 +187,7 @@ const NAV_OWNER = [
   {id:'distributor', label:'Distributor', icon:'🚚'},
   {id:'laporan', label:'Laporan Keuangan', icon:'📊'},
   {id:'cabang', label:'Cabang', icon:'🏢'},
+  {id:'akun', label:'Akun Staff', icon:'👤'},
   {id:'pengaturan', label:'Pengaturan', icon:'⚙️'},
 ];
 const NAV_KASIR = [
@@ -253,6 +254,7 @@ function renderShell(){
   else if(page==='distributor') renderDistributor();
   else if(page==='laporan') renderLaporan();
   else if(page==='cabang') renderCabang();
+  else if(page==='akun') renderAkun();
   else if(page==='riwayat') renderRiwayatSaya();
   else if(page==='pengaturan') renderPengaturan();
 }
@@ -757,6 +759,84 @@ function renderCabang(){
     if(!confirm('Hapus cabang ini? Data terkait mungkin akan terpengaruh.')) return;
     await sb.from('branches').delete().eq('id', b.dataset.delb); await loadMaster(); renderCabang();
   });
+}
+
+/* ================================================================
+   AKUN STAFF (owner)
+   ================================================================ */
+async function renderAkun(){
+  const el = document.getElementById('mainContent');
+  el.innerHTML = pageHeader('Akun Staff', 'Kelola login owner & kasir per cabang') + `
+  <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+    <button class="btn btn-primary" id="btnAddStaff">+ Tambah Akun</button>
+  </div>
+  <div class="card scrollx" id="staffTable">Memuat...</div>`;
+  document.getElementById('btnAddStaff').onclick = ()=>openStaffModal(null);
+  await drawStaffTable();
+}
+
+async function drawStaffTable(){
+  const {data, error} = await sb.from('staff').select('*').order('role').order('name');
+  const box = document.getElementById('staffTable');
+  if(error){ box.innerHTML = `<div style="padding:20px;color:var(--danger);">Gagal memuat: ${esc(error.message)}</div>`; return; }
+  box.innerHTML = `<table><thead><tr><th>Nama</th><th>Username</th><th>Role</th><th>Cabang</th><th>Aksi</th></tr></thead><tbody>
+    ${(data||[]).map(s=>`<tr>
+      <td style="font-weight:600;">${esc(s.name)}</td>
+      <td>${esc(s.username)}</td>
+      <td>${s.role==='owner'?'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Owner</span>':'<span class="pill" style="background:var(--surface-2);color:var(--text-dim);">Kasir</span>'}</td>
+      <td>${esc(branchName(s.branch_id))}</td>
+      <td><div style="display:flex;gap:4px;">
+        <button class="btn btn-ghost" data-editS="${s.id}" style="padding:5px 8px;">Edit</button>
+        ${s.id!==STATE.session.staff.id ? `<button class="btn btn-danger" data-delS="${s.id}" style="padding:5px 8px;">Hapus</button>` : ''}
+      </div></td>
+    </tr>`).join('') || `<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text-faint);">Belum ada akun.</td></tr>`}
+  </tbody></table>`;
+  box.querySelectorAll('[data-editS]').forEach(b=>b.onclick=async()=>{
+    const {data:s} = await sb.from('staff').select('*').eq('id', b.dataset.edits).single();
+    openStaffModal(s);
+  });
+  box.querySelectorAll('[data-delS]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('Hapus akun ini?')) return;
+    await sb.from('staff').delete().eq('id', b.dataset.dels);
+    await drawStaffTable();
+  });
+}
+
+function openStaffModal(s){
+  const bg = modalShell(s?'Edit Akun':'Tambah Akun', `
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div><label style="font-size:12px;color:var(--text-dim);">Nama</label><input id="st_name" value="${esc(s?.name||'')}" style="width:100%;margin-top:4px;"></div>
+      <div><label style="font-size:12px;color:var(--text-dim);">Username</label><input id="st_user" value="${esc(s?.username||'')}" style="width:100%;margin-top:4px;"></div>
+      <div><label style="font-size:12px;color:var(--text-dim);">${s?'Password Baru (kosongkan jika tidak diubah)':'Password'}</label><input id="st_pass" type="text" style="width:100%;margin-top:4px;" placeholder="${s?'••••••':''}"></div>
+      <div><label style="font-size:12px;color:var(--text-dim);">Role</label><select id="st_role" style="width:100%;margin-top:4px;">
+        <option value="kasir" ${s?.role==='kasir'?'selected':''}>Kasir</option>
+        <option value="owner" ${s?.role==='owner'?'selected':''}>Owner</option>
+      </select></div>
+      <div id="st_branchWrap" style="${s?.role==='owner'?'display:none;':''}">
+        <label style="font-size:12px;color:var(--text-dim);">Cabang</label>
+        <select id="st_branch" style="width:100%;margin-top:4px;">${STATE.branches.map(b=>`<option value="${b.id}" ${s?.branch_id===b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select>
+      </div>
+      <button class="btn btn-primary" id="st_save" style="margin-top:6px;">Simpan</button>
+      <p id="st_err" style="color:var(--danger);font-size:12.5px;display:none;"></p>
+    </div>`);
+  bg.querySelector('#st_role').onchange = (e)=>{ bg.querySelector('#st_branchWrap').style.display = e.target.value==='owner' ? 'none' : ''; };
+  bg.querySelector('#st_save').onclick = async ()=>{
+    const name = bg.querySelector('#st_name').value.trim();
+    const username = bg.querySelector('#st_user').value.trim();
+    const pass = bg.querySelector('#st_pass').value;
+    const role = bg.querySelector('#st_role').value;
+    const branch_id = role==='owner' ? null : bg.querySelector('#st_branch').value;
+    const err = bg.querySelector('#st_err');
+    if(!name || !username || (!s && !pass)){ err.textContent='Nama, username, dan password wajib diisi.'; err.style.display='block'; return; }
+    if(role==='kasir' && !branch_id){ err.textContent='Pilih cabang untuk akun kasir.'; err.style.display='block'; return; }
+    const payload = {name, username, role, branch_id};
+    if(pass) payload.password = pass;
+    let res;
+    if(s) res = await sb.from('staff').update(payload).eq('id', s.id);
+    else { payload.password = pass; res = await sb.from('staff').insert(payload); }
+    if(res.error){ err.textContent = res.error.message.includes('duplicate')? 'Username sudah dipakai.' : res.error.message; err.style.display='block'; return; }
+    bg.remove(); await drawStaffTable();
+  };
 }
 
 /* ================================================================
