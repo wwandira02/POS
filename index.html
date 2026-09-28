@@ -40,6 +40,7 @@ button{font-family:inherit;}
 input,select,textarea{font-family:inherit;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 11px;font-size:13.5px;outline:none;transition:border-color .15s;}
 input:focus,select:focus,textarea:focus{border-color:var(--accent);}
 button{cursor:pointer;border:none;}
+button:disabled{opacity:.45;cursor:not-allowed;}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 16px;border-radius:8px;font-size:13.5px;font-weight:600;transition:filter .15s, transform .05s;}
 .btn:active{transform:scale(.97);}
 .btn-primary{background:var(--accent);color:var(--accent-text);}
@@ -103,6 +104,12 @@ function fmtDateShort(d){ d=new Date(d); return d.toLocaleDateString('id-ID',{da
 function fmtDateTime(d){ d=new Date(d); return d.toLocaleDateString('id-ID',{day:'2-digit',month:'short',year:'numeric'}) + ' ' + d.toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}); }
 function uid(){ return 'x'+Math.random().toString(36).slice(2,10); }
 function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+/* ---------- Helper produk curah (stok disimpan dalam GRAM) ---------- */
+function fmtG(g){ g = Number(g)||0; const a = Math.abs(g); return a>=1000 ? (g/1000).toLocaleString('id-ID',{maximumFractionDigits:3})+' kg' : g.toLocaleString('id-ID')+' g'; }
+function fmtStock(p){ return p.is_bulk ? fmtG(p.stock) : (p.stock+' '+(p.units?.name||'')).trim(); }
+function fmtMin(p){ return p.is_bulk ? fmtG(p.min_stock) : p.min_stock; }
+function optsOf(p){ return Array.isArray(p.sell_options) ? p.sell_options : []; }
 
 /* ---------------- THEME ---------------- */
 function applyTheme(){
@@ -237,12 +244,13 @@ function renderShell(){
       #sidebar.open{transform:translateX(0);box-shadow:0 20px 60px rgba(0,0,0,.3);}
       #mainWrap{margin-left:0;}
       #btnMenu{display:inline-flex !important;}
+      #posGrid{grid-template-columns:1fr !important;}
     }
   </style>`;
   document.querySelectorAll('[data-nav]').forEach(el=>el.onclick=()=>{ STATE.page = el.dataset.nav; renderShell(); });
   document.getElementById('btnLogout').onclick = logout;
   const bs = document.getElementById('branchSwitch');
-  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); await loadProducts(); renderShell(); };
+  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); STATE.cart=[]; await loadProducts(); renderShell(); };
   const btnMenu = document.getElementById('btnMenu');
   if(btnMenu) btnMenu.onclick = ()=> document.getElementById('sidebar').classList.toggle('open');
   document.querySelectorAll('.navitem').forEach(el=>{ if(el.dataset.nav===STATE.page) el.classList.add('active'); });
@@ -318,6 +326,12 @@ function renderPOS(){
   renderCart();
 }
 
+/* Total stok (satuan dasar: gram utk curah, pcs utk biasa) yang sudah masuk keranjang */
+function cartUsed(productId, exceptKey){
+  return STATE.cart.filter(c=>c.product_id===productId && c.key!==exceptKey).reduce((s,c)=>s + c.qty*c.per, 0);
+}
+function stockLeft(p){ return (p.stock||0) - cartUsed(p.id); }
+
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
   const cat = document.getElementById('posCat').value;
@@ -325,46 +339,83 @@ function renderPosProducts(){
   if(cat) list = list.filter(p=>p.category_id===cat);
   const box = document.getElementById('posProdList');
   if(!list.length){ box.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-faint);">Tidak ada produk.</div>`; return; }
-  box.innerHTML = list.map(p=>`
+  box.innerHTML = list.map(p=>{
+    const status = p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'');
+    const info = `${esc(p.brands?.name||'-')} · ${esc(p.categories?.name||'-')} · Stok: ${esc(fmtStock(p))}`;
+    if(p.is_bulk){
+      const left = stockLeft(p);
+      return `
+      <div style="padding:11px 12px;border-radius:8px;border-bottom:1px solid var(--border);">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div>
+            <div style="font-weight:700;font-size:13.5px;">${esc(p.name)}</div>
+            <div style="font-size:11.5px;color:var(--text-faint);">${info}</div>
+          </div>
+          <div>${status}</div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
+          ${optsOf(p).map((o,i)=>`<button class="btn btn-ghost" data-bulk="${p.id}" data-opt="${i}" ${Number(o.gram)>left?'disabled':''} style="padding:6px 10px;font-size:12.5px;">${esc(o.label)} · <span style="color:var(--accent);">${fmtIDR(o.price)}</span></button>`).join('') || '<span style="font-size:12px;color:var(--text-faint);">Belum ada takaran jual.</span>'}
+        </div>
+      </div>`;
+    }
+    return `
     <div class="posCardItem" data-id="${p.id}" style="display:flex;justify-content:space-between;align-items:center;padding:11px 12px;border-radius:8px;cursor:pointer;" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
       <div>
         <div style="font-weight:700;font-size:13.5px;">${esc(p.name)}</div>
-        <div style="font-size:11.5px;color:var(--text-faint);">${esc(p.brands?.name||'-')} · ${esc(p.categories?.name||'-')} · Stok: ${p.stock} ${esc(p.units?.name||'')}</div>
+        <div style="font-size:11.5px;color:var(--text-faint);">${info}</div>
       </div>
       <div style="text-align:right;">
         <div style="font-weight:700;color:var(--accent);">${fmtIDR(p.sell_price)}</div>
-        ${p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'')}
+        ${status}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   box.querySelectorAll('.posCardItem').forEach(el=>el.onclick=()=>addToCart(el.dataset.id));
+  box.querySelectorAll('[data-bulk]').forEach(el=>el.onclick=()=>addToCart(el.dataset.bulk, Number(el.dataset.opt)));
 }
 
-function addToCart(id){
+function addToCart(id, optIdx){
   const p = STATE.products.find(x=>x.id===id);
   if(!p || p.stock<=0){ return; }
-  const existing = STATE.cart.find(c=>c.product_id===id);
-  if(existing){ if(existing.qty < p.stock) existing.qty++; }
-  else STATE.cart.push({product_id:id, name:p.name, price:p.sell_price, buy_price:p.buy_price, qty:1, discount:0, maxStock:p.stock});
+  let per=1, price=p.sell_price, buy=p.buy_price, name=p.name, key=id;
+  if(p.is_bulk){
+    const o = optsOf(p)[optIdx]; if(!o) return;
+    per = Number(o.gram); price = Number(o.price)||0;
+    buy = Math.round(Number(p.buy_price||0) * per / 1000); // harga beli per kg -> per takaran
+    name = `${p.name} (${o.label})`; key = id+':'+per;
+  }
+  if(stockLeft(p) < per) return;
+  const existing = STATE.cart.find(c=>c.key===key);
+  if(existing) existing.qty++;
+  else STATE.cart.push({key, product_id:id, name, price, buy_price:buy, qty:1, discount:0, per});
   renderCart();
+}
+
+function maxQtyFor(c){
+  const p = STATE.products.find(x=>x.id===c.product_id);
+  const others = cartUsed(c.product_id, c.key);
+  return Math.max(1, Math.floor(((p?.stock||0) - others) / c.per));
 }
 
 function renderCart(){
   const box = document.getElementById('cartList');
-  if(!STATE.cart.length){ box.innerHTML = `<div style="text-align:center;color:var(--text-faint);padding:20px 0;font-size:13px;">Keranjang kosong</div>`; renderCartSummary(); return; }
+  if(!box) return;
+  if(!STATE.cart.length){ box.innerHTML = `<div style="text-align:center;color:var(--text-faint);padding:20px 0;font-size:13px;">Keranjang kosong</div>`; renderCartSummary(); if(document.getElementById('posProdList')) renderPosProducts(); return; }
   box.innerHTML = STATE.cart.map((c,i)=>`
     <div style="display:flex;gap:8px;align-items:center;">
       <div style="flex:1;min-width:0;">
         <div style="font-weight:600;font-size:12.5px;white-space:normal;">${esc(c.name)}</div>
-        <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(c.price)} × ${c.qty}</div>
+        <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(c.price)} × ${c.qty}${c.per>1?' · '+fmtG(c.per*c.qty):''}</div>
       </div>
-      <input type="number" min="1" max="${c.maxStock}" value="${c.qty}" data-qty="${i}" style="width:52px;padding:5px 6px;text-align:center;">
+      <input type="number" min="1" max="${maxQtyFor(c)}" value="${c.qty}" data-qty="${i}" style="width:52px;padding:5px 6px;text-align:center;">
       <input type="number" min="0" value="${c.discount}" data-disc="${i}" placeholder="Disk" style="width:66px;padding:5px 6px;">
       <button data-del="${i}" class="btn btn-danger" style="padding:5px 8px;">✕</button>
     </div>`).join('');
-  box.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ let v=Math.max(1,Math.min(Number(el.value)||1, STATE.cart[el.dataset.qty].maxStock)); STATE.cart[el.dataset.qty].qty=v; renderCart(); });
+  box.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ const c=STATE.cart[el.dataset.qty]; c.qty=Math.max(1,Math.min(Number(el.value)||1, maxQtyFor(c))); renderCart(); });
   box.querySelectorAll('[data-disc]').forEach(el=>el.onchange=()=>{ STATE.cart[el.dataset.disc].discount = Number(el.value)||0; renderCartSummary(); });
   box.querySelectorAll('[data-del]').forEach(el=>el.onclick=()=>{ STATE.cart.splice(el.dataset.del,1); renderCart(); });
   renderCartSummary();
+  if(document.getElementById('posProdList')) renderPosProducts();
 }
 
 function cartTotals(){
@@ -397,6 +448,17 @@ async function saveSale(){
   const change = STATE.payMethod==='Tunai' ? cash-total : 0;
   const btn = document.getElementById('btnSaveSale'); btn.disabled=true; btn.textContent='Menyimpan...';
   try{
+    // Total pengurangan stok per produk (gram untuk curah, pcs untuk biasa)
+    const need = {};
+    STATE.cart.forEach(c=>{ need[c.product_id] = (need[c.product_id]||0) + c.qty*c.per; });
+    // Cek stok terbaru dari database sebelum menyimpan
+    const fresh = {};
+    for(const pid of Object.keys(need)){
+      const {data:fp, error:fe} = await sb.from('products').select('name, stock, is_bulk').eq('id', pid).single();
+      if(fe) throw fe;
+      if(Number(fp.stock) < need[pid]) throw new Error('Stok "'+fp.name+'" tidak cukup (sisa '+(fp.is_bulk?fmtG(fp.stock):fp.stock)+').');
+      fresh[pid] = fp;
+    }
     const {data: sale, error} = await sb.from('sales').insert({
       branch_id: STATE.activeBranchId, staff_id: STATE.session.staff.id, staff_name: STATE.session.staff.name,
       subtotal, discount_total: totalDisc, total, paid: STATE.payMethod==='Tunai'?cash:total, change_amount: change,
@@ -405,10 +467,10 @@ async function saveSale(){
     if(error) throw error;
     for(const c of STATE.cart){
       await sb.from('sale_items').insert({sale_id: sale.id, product_id:c.product_id, product_name:c.name, qty:c.qty, price:c.price, discount:c.discount, buy_price:c.buy_price});
-      const p = STATE.products.find(x=>x.id===c.product_id);
-      const newStock = (p.stock||0) - c.qty;
-      await sb.from('products').update({stock:newStock}).eq('id', c.product_id);
-      await sb.from('stock_history').insert({product_id:c.product_id, branch_id:STATE.activeBranchId, change_qty:-c.qty, type:'sale', note:'Penjualan #'+sale.id.slice(0,8)});
+    }
+    for(const pid of Object.keys(need)){
+      await sb.from('products').update({stock: Number(fresh[pid].stock) - need[pid]}).eq('id', pid);
+      await sb.from('stock_history').insert({product_id:pid, branch_id:STATE.activeBranchId, change_qty:-need[pid], type:'sale', note:'Penjualan #'+sale.id.slice(0,8)});
     }
     STATE.cart=[]; STATE.txDiscount=0; STATE.note='';
     await loadProducts();
@@ -435,7 +497,7 @@ function renderProduk(){
   </div>
   ${lowStock.length? `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${lowStock.length})</h3>
   <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
-  ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${p.stock}</td><td>${p.min_stock}</td></tr>`).join('')}
+  ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
   </tbody></table></div>` : ''}`;
 
   function draw(){
@@ -446,12 +508,12 @@ function renderProduk(){
         <td style="font-weight:600;">${esc(p.name)}</td>
         <td>${esc(p.brands?.name||'-')}</td>
         <td>${esc(p.categories?.name||'-')}</td>
-        <td>${esc(p.units?.name||'-')}</td>
-        <td>${fmtIDR(p.buy_price)}</td>
-        <td>${fmtIDR(p.sell_price)}</td>
-        <td style="color:var(--accent);font-weight:600;">${fmtIDR(p.sell_price-p.buy_price)}</td>
-        <td>${p.stock}</td>
-        <td>${p.min_stock}</td>
+        <td>${p.is_bulk?'Curah (gram)':esc(p.units?.name||'-')}</td>
+        <td>${fmtIDR(p.buy_price)}${p.is_bulk?' /kg':''}</td>
+        <td style="${p.is_bulk?'white-space:normal;font-size:12px;min-width:150px;':''}">${p.is_bulk ? (optsOf(p).map(o=>esc(o.label)+': '+fmtIDR(o.price)).join('<br>')||'-') : fmtIDR(p.sell_price)}</td>
+        <td style="color:var(--accent);font-weight:600;">${p.is_bulk ? '-' : fmtIDR(p.sell_price-p.buy_price)}</td>
+        <td>${esc(fmtStock(p))}</td>
+        <td>${esc(fmtMin(p))}</td>
         <td>${p.stock<=0?'<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>':p.stock<=p.min_stock?'<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Aman</span>'}</td>
         <td>
           <div style="display:flex;gap:4px;">
@@ -483,8 +545,26 @@ function modalShell(title, bodyHtml){
   return bg;
 }
 
+const DEFAULT_OPTS = [
+  {label:'1 kg', gram:1000, price:0},
+  {label:'5 ons', gram:500, price:0},
+  {label:'1 ons', gram:100, price:0},
+  {label:'½ ons', gram:50, price:0},
+];
+
+function optRowHtml(o){
+  return `<div class="optRow" style="display:flex;gap:6px;margin-bottom:6px;">
+    <input class="o_label" placeholder="Label" value="${esc(o.label||'')}" style="flex:1.2;min-width:0;">
+    <input class="o_gram" type="number" min="1" placeholder="Gram" value="${o.gram||''}" style="width:72px;">
+    <input class="o_price" type="number" min="0" placeholder="Harga jual" value="${o.price||''}" style="flex:1;min-width:0;">
+    <button type="button" class="btn btn-danger o_del" style="padding:5px 9px;">✕</button>
+  </div>`;
+}
+
 function openProductModal(id){
   const p = id ? STATE.products.find(x=>x.id===id) : null;
+  const isBulk = !!p?.is_bulk;
+  const opts = isBulk ? optsOf(p) : DEFAULT_OPTS;
   const bg = modalShell(p?'Edit Produk':'Tambah Produk', `
     <div style="display:flex;flex-direction:column;gap:10px;">
       <div><label style="font-size:12px;color:var(--text-dim);">Nama Produk</label><input id="f_name" value="${esc(p?.name||'')}" style="width:100%;margin-top:4px;"></div>
@@ -492,43 +572,108 @@ function openProductModal(id){
         <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Merek</label><select id="f_brand" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.brands.map(b=>`<option value="${b.id}" ${p?.brand_id===b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>
         <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Kategori</label><select id="f_cat" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.categories.map(c=>`<option value="${c.id}" ${p?.category_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
       </div>
-      <div><label style="font-size:12px;color:var(--text-dim);">Satuan</label><select id="f_unit" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.units.map(u=>`<option value="${u.id}" ${p?.unit_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></div>
-      <div style="display:flex;gap:8px;">
-        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli</label><input id="f_buy" type="number" value="${p?.buy_price||0}" style="width:100%;margin-top:4px;"></div>
-        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Jual</label><input id="f_sell" type="number" value="${p?.sell_price||0}" style="width:100%;margin-top:4px;"></div>
+
+      <label style="display:flex;gap:8px;align-items:flex-start;background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:12.5px;cursor:${p?'not-allowed':'pointer'};">
+        <input type="checkbox" id="f_bulk" ${isBulk?'checked':''} ${p?'disabled':''} style="margin-top:2px;">
+        <span><b>Produk curah</b> (misal tembakau) — stok disimpan 1 angka dalam gram, dijual eceran per kg / ons / ½ ons.${p?'<br><i style="color:var(--text-faint);">Jenis produk tidak bisa diubah setelah dibuat.</i>':''}</span>
+      </label>
+
+      <!-- PRODUK BIASA -->
+      <div id="sec_normal" style="display:${isBulk?'none':'flex'};flex-direction:column;gap:10px;">
+        <div><label style="font-size:12px;color:var(--text-dim);">Satuan</label><select id="f_unit" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.units.map(u=>`<option value="${u.id}" ${p?.unit_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></div>
+        <div style="display:flex;gap:8px;">
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli</label><input id="f_buy" type="number" value="${!isBulk?(p?.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Jual</label><input id="f_sell" type="number" value="${!isBulk?(p?.sell_price||0):0}" style="width:100%;margin-top:4px;"></div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal</label><input id="f_stock" type="number" value="0" style="width:100%;margin-top:4px;"></div>`:''}
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label><input id="f_min" type="number" value="${!isBulk?(p?.min_stock||0):0}" style="width:100%;margin-top:4px;"></div>
+        </div>
       </div>
-      <div style="display:flex;gap:8px;">
-        ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal</label><input id="f_stock" type="number" value="0" style="width:100%;margin-top:4px;"></div>`:''}
-        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label><input id="f_min" type="number" value="${p?.min_stock||0}" style="width:100%;margin-top:4px;"></div>
+
+      <!-- PRODUK CURAH -->
+      <div id="sec_bulk" style="display:${isBulk?'flex':'none'};flex-direction:column;gap:10px;">
+        <div style="display:flex;gap:8px;">
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per kg (Rp)</label><input id="fb_buy" type="number" min="0" value="${isBulk?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal (kg)</label><input id="fb_stock" type="number" min="0" step="any" value="0" style="width:100%;margin-top:4px;"></div>`:''}
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok (kg)</label><input id="fb_min" type="number" min="0" step="any" value="${isBulk?(p.min_stock||0)/1000:0}" style="width:100%;margin-top:4px;"></div>
+        </div>
+        <div>
+          <label style="font-size:12px;color:var(--text-dim);">Takaran jual (label · berat dalam gram · harga jual)</label>
+          <div style="font-size:11px;color:var(--text-faint);margin:2px 0 6px;">1 kg = 1000 g · 1 ons = 100 g · ½ ons = 50 g</div>
+          <div id="optList">${opts.map(optRowHtml).join('')}</div>
+          <button type="button" class="btn btn-ghost" id="optAdd" style="padding:6px 10px;font-size:12.5px;">+ Tambah takaran</button>
+        </div>
       </div>
+
       <button class="btn btn-primary" id="f_save" style="margin-top:6px;">Simpan</button>
     </div>`);
+
+  const bulkChk = bg.querySelector('#f_bulk');
+  bulkChk.onchange = ()=>{
+    bg.querySelector('#sec_normal').style.display = bulkChk.checked ? 'none' : 'flex';
+    bg.querySelector('#sec_bulk').style.display = bulkChk.checked ? 'flex' : 'none';
+  };
+  const optList = bg.querySelector('#optList');
+  optList.onclick = (e)=>{ const b = e.target.closest('.o_del'); if(b) b.closest('.optRow').remove(); };
+  bg.querySelector('#optAdd').onclick = ()=> optList.insertAdjacentHTML('beforeend', optRowHtml({}));
+
   bg.querySelector('#f_save').onclick = async ()=>{
+    const bulk = bulkChk.checked;
     const payload = {
       name: bg.querySelector('#f_name').value.trim(),
       brand_id: bg.querySelector('#f_brand').value||null,
       category_id: bg.querySelector('#f_cat').value||null,
-      unit_id: bg.querySelector('#f_unit').value||null,
-      buy_price: Number(bg.querySelector('#f_buy').value)||0,
-      sell_price: Number(bg.querySelector('#f_sell').value)||0,
-      min_stock: Number(bg.querySelector('#f_min').value)||0,
+      is_bulk: bulk,
     };
     if(!payload.name){ alert('Nama produk wajib diisi.'); return; }
-    if(p){ await sb.from('products').update(payload).eq('id', p.id); }
-    else { payload.branch_id = STATE.activeBranchId; payload.stock = Number(bg.querySelector('#f_stock').value)||0; await sb.from('products').insert(payload); }
+
+    if(bulk){
+      const options = [...bg.querySelectorAll('.optRow')].map(r=>({
+        label: r.querySelector('.o_label').value.trim(),
+        gram: Math.round(Number(r.querySelector('.o_gram').value)||0),
+        price: Number(r.querySelector('.o_price').value)||0,
+      })).filter(o=>o.label && o.gram>0);
+      if(!options.length){ alert('Tambahkan minimal satu takaran jual (label + gram).'); return; }
+      if(options.some(o=>o.price<=0)){ alert('Isi harga jual untuk setiap takaran.'); return; }
+      payload.unit_id = null;
+      payload.buy_price = Number(bg.querySelector('#fb_buy').value)||0;  // per kg
+      payload.sell_price = 0;
+      payload.min_stock = Math.round((Number(bg.querySelector('#fb_min').value)||0)*1000);
+      payload.sell_options = options;
+      if(!p) payload.stock = Math.round((Number(bg.querySelector('#fb_stock').value)||0)*1000);
+    } else {
+      payload.unit_id = bg.querySelector('#f_unit').value||null;
+      payload.buy_price = Number(bg.querySelector('#f_buy').value)||0;
+      payload.sell_price = Number(bg.querySelector('#f_sell').value)||0;
+      payload.min_stock = Number(bg.querySelector('#f_min').value)||0;
+      payload.sell_options = [];
+      if(!p) payload.stock = Number(bg.querySelector('#f_stock').value)||0;
+    }
+
+    let res;
+    if(p){ res = await sb.from('products').update(payload).eq('id', p.id); }
+    else { payload.branch_id = STATE.activeBranchId; res = await sb.from('products').insert(payload); }
+    if(res.error){ alert('Gagal menyimpan: '+res.error.message+'\n\nPastikan kolom is_bulk & sell_options sudah ditambahkan di Supabase.'); return; }
     bg.remove(); await loadProducts(); renderProduk();
   };
 }
 
 function openStockModal(id){
   const p = STATE.products.find(x=>x.id===id);
+  const bulk = !!p.is_bulk;
   const bg = modalShell('Ubah Stok — '+p.name, `
-    <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Stok saat ini: <b>${p.stock} ${esc(p.units?.name||'')}</b></p>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Stok saat ini: <b>${esc(fmtStock(p))}</b></p>
     <div style="display:flex;gap:8px;margin-bottom:10px;">
       <button class="tabbtn active" data-type="in" style="flex:1;">Tambah Stok</button>
       <button class="tabbtn" data-type="out" style="flex:1;">Kurangi Stok</button>
     </div>
-    <input id="s_qty" type="number" min="1" placeholder="Jumlah" style="width:100%;margin-bottom:8px;">
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <input id="s_qty" type="number" min="0" step="${bulk?'any':'1'}" placeholder="Jumlah" style="flex:1;min-width:0;">
+      ${bulk?`<select id="s_unit" style="width:90px;"><option value="1000">kg</option><option value="1">gram</option></select>`:''}
+    </div>
     <input id="s_note" placeholder="Catatan (opsional)" style="width:100%;margin-bottom:10px;">
     <button class="btn btn-primary" id="s_save" style="width:100%;">Simpan</button>
     <h4 style="font-size:12.5px;margin:16px 0 8px;color:var(--text-dim);">Riwayat Stok Terbaru</h4>
@@ -536,16 +681,20 @@ function openStockModal(id){
   let type='in';
   bg.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{ type=b.dataset.type; bg.querySelectorAll('[data-type]').forEach(x=>x.classList.remove('active')); b.classList.add('active'); });
   bg.querySelector('#s_save').onclick = async ()=>{
-    const qty = Number(bg.querySelector('#s_qty').value);
+    const raw = Number(bg.querySelector('#s_qty').value);
+    const qty = bulk ? Math.round(raw * Number(bg.querySelector('#s_unit').value)) : raw;
     if(!qty || qty<=0){ alert('Jumlah tidak valid.'); return; }
     const change = type==='in'?qty:-qty;
-    const newStock = Math.max(0, p.stock+change);
+    // baca stok terbaru supaya tidak menimpa penjualan yang baru masuk
+    const {data:cur} = await sb.from('products').select('stock').eq('id', p.id).single();
+    const newStock = Math.max(0, Number(cur?.stock ?? p.stock)+change);
     await sb.from('products').update({stock:newStock}).eq('id', p.id);
     await sb.from('stock_history').insert({product_id:p.id, branch_id:p.branch_id, change_qty:change, type, note:bg.querySelector('#s_note').value});
     bg.remove(); await loadProducts(); renderProduk();
   };
+  const showQty = (q)=> bulk ? (q>0?'+':'-')+fmtG(Math.abs(q)) : (q>0?'+':'')+q;
   sb.from('stock_history').select('*').eq('product_id', id).order('created_at',{ascending:false}).limit(10).then(({data})=>{
-    bg.querySelector('#s_history').innerHTML = (data||[]).map(h=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);">${fmtDateTime(h.created_at)} · <b style="color:${h.change_qty>0?'var(--accent)':'var(--danger)'}">${h.change_qty>0?'+':''}${h.change_qty}</b> · ${esc(h.type)} ${h.note?'· '+esc(h.note):''}</div>`).join('') || 'Belum ada riwayat.';
+    bg.querySelector('#s_history').innerHTML = (data||[]).map(h=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);">${fmtDateTime(h.created_at)} · <b style="color:${h.change_qty>0?'var(--accent)':'var(--danger)'}">${esc(showQty(Number(h.change_qty)))}</b> · ${esc(h.type)} ${h.note?'· '+esc(h.note):''}</div>`).join('') || 'Belum ada riwayat.';
   });
 }
 
@@ -705,7 +854,7 @@ async function loadLaporan(){
   ];
   content.innerHTML = `
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:20px;">
-    ${cards.map(c=>`<div class="card" style="padding:16px;"><div style="font-size:11.5px;color:var(--text-dim);margin-bottom:6px;">${c[0]}</div><div style="font-size:19px;font-weight:800;color:${c[2]};">${c[1]}</div></div>`).join('')}
+    ${cards.map(c=>`<div class="card" style="padding:16px;"><div style="font-size:11.5px;color:var(--text-dim);margin-bottom:6px;">${c[0]}</div><div style="font-size:19px;font-weight:800;color:${c[2]};">${esc(c[1])}</div></div>`).join('')}
   </div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
     <div class="card scrollx">
@@ -728,7 +877,7 @@ function exportLaporanCSV(r){
   let csv = 'Ringkasan Laporan Keuangan Raja Tobacco\n';
   csv += `Total Omset Masuk,${r.omsetMasuk}\nTotal Omset,${r.totalOmset}\nTotal Laba,${r.totalLaba}\nTotal Omset Keluar,${r.omsetKeluar}\nProduk Terjual,${r.produkTerjual}\n\n`;
   csv += 'Tanggal,Cabang,Kasir,Total,Metode\n';
-  (r.sales||[]).forEach(s=>{ csv += `${fmtDateTime(s.created_at)},${branchName(s.branch_id)},${s.staff_name||''},${s.total},${s.payment_method}\n`; });
+  (r.sales||[]).forEach(s=>{ csv += `"${fmtDateTime(s.created_at)}","${branchName(s.branch_id)}","${s.staff_name||''}",${s.total},${s.payment_method}\n`; });
   const blob = new Blob([csv], {type:'text/csv'});
   const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='laporan-raja-tobacco.csv'; a.click();
 }
