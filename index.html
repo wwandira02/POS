@@ -57,6 +57,9 @@ td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:13.5px;whit
 tr:last-child td{border-bottom:none;}
 .scrollx{overflow-x:auto;}
 #mainWrap{margin-left:230px;}
+.posCard{display:inline-block;width:100%;transition:border-color .12s;}
+.posCardItem:hover{border-color:var(--accent);}
+.posOptRow:hover:not(.disabled){background:var(--accent-dim);}
 .sidebar-overlay{display:none;}
 .clickrow{cursor:pointer;}
 .clickrow:hover td{background:var(--surface-2);}
@@ -100,6 +103,7 @@ let STATE = {
   branches: [], categories: [], brands: [], units: [], distributors: [],
   products: [], cart: [], page: 'pos',
   txDiscount: 0, note: '', payMethod: 'Tunai',
+  posCat: null, posBrand: null,
 };
 
 function fmtIDR(n){ n = Number(n)||0; return 'Rp' + n.toLocaleString('id-ID',{maximumFractionDigits:0}); }
@@ -267,7 +271,7 @@ function renderShell(){
   document.querySelectorAll('[data-nav]').forEach(el=>el.onclick=()=>{ STATE.page = el.dataset.nav; renderShell(); });
   document.getElementById('btnLogout').onclick = logout;
   const bs = document.getElementById('branchSwitch');
-  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); STATE.cart=[]; await loadProducts(); renderShell(); };
+  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); STATE.cart=[]; STATE.posCat=null; STATE.posBrand=null; await loadProducts(); renderShell(); };
   const btnMenu = document.getElementById('btnMenu');
   function toggleSidebar(force){
     const open = typeof force==='boolean' ? force : !document.getElementById('sidebar').classList.contains('open');
@@ -306,11 +310,10 @@ function renderPOS(){
   el.innerHTML = `
   <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:18px;align-items:start;" id="posGrid">
     <div>
-      <div style="display:flex;gap:10px;margin-bottom:12px;">
-        <input id="posSearch" placeholder="Cari produk..." style="flex:1;">
-        <select id="posCat" style="width:160px;"><option value="">Semua Kategori</option>${STATE.categories.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select>
-      </div>
-      <div id="posProdList" class="card" style="padding:6px;max-height:calc(100vh - 170px);overflow-y:auto;"></div>
+      <input id="posSearch" placeholder="Cari produk..." style="width:100%;margin-bottom:10px;">
+      <div id="posCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
+      <div id="posBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
+      <div id="posProdList" style="column-width:168px;column-gap:10px;max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;"></div>
     </div>
     <div class="card" style="padding:16px;position:sticky;top:80px;">
       <h3 style="font-size:15px;font-weight:800;margin-bottom:10px;">Keranjang</h3>
@@ -339,13 +342,13 @@ function renderPOS(){
   </div>`;
 
   document.getElementById('posSearch').oninput = renderPosProducts;
-  document.getElementById('posCat').onchange = renderPosProducts;
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>{ STATE.payMethod=b.dataset.pay; renderPOS(); });
   document.getElementById('posDiscTx').oninput = e=>{ STATE.txDiscount = Number(e.target.value)||0; renderCartSummary(); };
   document.getElementById('posNote').oninput = e=> STATE.note = e.target.value;
   const cashEl = document.getElementById('posCash'); if(cashEl) cashEl.oninput = renderCartSummary;
   document.getElementById('btnClearCart').onclick = ()=>{ STATE.cart=[]; STATE.txDiscount=0; STATE.note=''; renderPOS(); };
   document.getElementById('btnSaveSale').onclick = saveSale;
+  renderPosCats();
   renderPosProducts();
   renderCart();
 }
@@ -356,46 +359,83 @@ function cartUsed(productId, exceptKey){
 }
 function stockLeft(p){ return (p.stock||0) - cartUsed(p.id); }
 
+/* Chip kategori: klik langsung untuk filter, klik lagi untuk batal */
+function renderPosCats(){
+  const box = document.getElementById('posCatRow');
+  if(!box) return;
+  const all = [{id:'', name:'Semua Kategori'}, ...STATE.categories];
+  box.innerHTML = all.map(c=>{
+    const active = (STATE.posCat||'') === c.id;
+    return `<button class="tabbtn ${active?'active':''}" data-catchip="${c.id}" style="white-space:nowrap;flex:none;">${esc(c.name)}</button>`;
+  }).join('');
+  box.querySelectorAll('[data-catchip]').forEach(b=>b.onclick=()=>{
+    const id = b.dataset.catchip;
+    STATE.posCat = (STATE.posCat||'')===id ? null : (id||null);
+    STATE.posBrand = null;
+    renderPosCats(); renderPosBrands(); renderPosProducts();
+  });
+  renderPosBrands();
+}
+
+/* Chip merek: muncul di bawah kalau satu kategori sedang dipilih */
+function renderPosBrands(){
+  const box = document.getElementById('posBrandRow');
+  if(!box) return;
+  if(!STATE.posCat){ box.style.display='none'; box.innerHTML=''; return; }
+  const idsHere = new Set(STATE.products.filter(p=>p.category_id===STATE.posCat && p.brand_id).map(p=>p.brand_id));
+  const brandsHere = STATE.brands.filter(b=>idsHere.has(b.id));
+  if(!brandsHere.length){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='flex';
+  const all = [{id:'', name:'Semua Merek'}, ...brandsHere];
+  box.innerHTML = all.map(b=>{
+    const active = (STATE.posBrand||'') === b.id;
+    return `<button class="tabbtn ${active?'active':''}" data-brandchip="${b.id}" style="white-space:nowrap;flex:none;">${esc(b.name)}</button>`;
+  }).join('');
+  box.querySelectorAll('[data-brandchip]').forEach(b=>b.onclick=()=>{
+    const id = b.dataset.brandchip;
+    STATE.posBrand = (STATE.posBrand||'')===id ? null : (id||null);
+    renderPosBrands(); renderPosProducts();
+  });
+}
+
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
-  const cat = document.getElementById('posCat').value;
   let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
-  if(cat) list = list.filter(p=>p.category_id===cat);
+  if(STATE.posCat) list = list.filter(p=>p.category_id===STATE.posCat);
+  if(STATE.posBrand) list = list.filter(p=>p.brand_id===STATE.posBrand);
   const box = document.getElementById('posProdList');
   if(!list.length){ box.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-faint);">Tidak ada produk.</div>`; return; }
   box.innerHTML = list.map(p=>{
     const status = p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'');
-    const info = `${esc(p.brands?.name||'-')} · ${esc(p.categories?.name||'-')} · Stok: ${esc(fmtStock(p))}`;
     if(p.is_bulk){
       const left = stockLeft(p);
       return `
-      <div style="padding:11px 12px;border-radius:8px;border-bottom:1px solid var(--border);">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-          <div>
-            <div style="font-weight:700;font-size:13.5px;">${esc(p.name)}</div>
-            <div style="font-size:11.5px;color:var(--text-faint);">${info}</div>
-          </div>
-          <div>${status}</div>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">
-          ${optsOf(p).map((o,i)=>`<button class="btn btn-ghost" data-bulk="${p.id}" data-opt="${i}" ${Number(o.gram)>left?'disabled':''} style="padding:6px 10px;font-size:12.5px;">${esc(o.label)} · <span style="color:var(--accent);">${fmtIDR(o.price)}</span></button>`).join('') || '<span style="font-size:12px;color:var(--text-faint);">Belum ada takaran jual.</span>'}
+      <div class="posCard" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:11px;background:var(--surface);">
+        <div style="font-weight:700;font-size:13px;">${esc(p.name)}</div>
+        <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:7px;">${esc(p.brands?.name||'-')} · Stok ${esc(fmtStock(p))} ${status}</div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          ${optsOf(p).map((o,i)=>{
+            const disabled = Number(o.gram) > left;
+            return `<div class="posOptRow ${disabled?'disabled':''}" data-bulk="${p.id}" data-opt="${i}" style="display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border-radius:7px;background:var(--surface-2);${disabled?'opacity:.4;cursor:not-allowed;':'cursor:pointer;'}">
+              <span style="font-size:12px;font-weight:600;">${esc(o.label)}</span>
+              <span style="font-size:12px;color:var(--accent);font-weight:700;">${fmtIDR(o.price)}</span>
+            </div>`;
+          }).join('') || '<div style="font-size:11px;color:var(--text-faint);">Belum ada takaran jual.</div>'}
         </div>
       </div>`;
     }
     return `
-    <div class="posCardItem" data-id="${p.id}" style="display:flex;justify-content:space-between;align-items:center;padding:11px 12px;border-radius:8px;cursor:pointer;" onmouseover="this.style.background='var(--surface-2)'" onmouseout="this.style.background='transparent'">
-      <div>
-        <div style="font-weight:700;font-size:13.5px;">${esc(p.name)}</div>
-        <div style="font-size:11.5px;color:var(--text-faint);">${info}</div>
-      </div>
-      <div style="text-align:right;">
-        <div style="font-weight:700;color:var(--accent);">${fmtIDR(p.sell_price)}</div>
+    <div class="posCard posCardItem" data-id="${p.id}" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:10px 11px;background:var(--surface);cursor:pointer;">
+      <div style="font-weight:700;font-size:12.5px;">${esc(p.name)}</div>
+      <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:5px;">${esc(p.brands?.name||'-')}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+        <span style="font-weight:700;color:var(--accent);font-size:12.5px;">${fmtIDR(p.sell_price)}</span>
         ${status}
       </div>
     </div>`;
   }).join('');
   box.querySelectorAll('.posCardItem').forEach(el=>el.onclick=()=>addToCart(el.dataset.id));
-  box.querySelectorAll('[data-bulk]').forEach(el=>el.onclick=()=>addToCart(el.dataset.bulk, Number(el.dataset.opt)));
+  box.querySelectorAll('[data-bulk]:not(.disabled)').forEach(el=>el.onclick=()=>addToCart(el.dataset.bulk, Number(el.dataset.opt)));
 }
 
 function addToCart(id, optIdx){
