@@ -308,14 +308,14 @@ function renderPOS(){
     return;
   }
   el.innerHTML = `
-  <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:18px;align-items:start;" id="posGrid">
+  <div style="display:grid;grid-template-columns:1.9fr 1fr;gap:18px;align-items:start;" id="posGrid">
     <div style="min-width:0;">
       <input id="posSearch" placeholder="Cari produk..." style="width:100%;margin-bottom:10px;">
       <div id="posCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
       <div id="posBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
       <div id="posProdList" style="column-width:168px;column-gap:10px;max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;"></div>
     </div>
-    <div class="card" style="padding:16px;position:sticky;top:80px;">
+    <div class="card" style="padding:16px;position:sticky;top:80px;max-width:340px;justify-self:end;width:100%;">
       <h3 style="font-size:15px;font-weight:800;margin-bottom:10px;">Keranjang</h3>
       <div id="cartList" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:12px;"></div>
       <div style="border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px;">
