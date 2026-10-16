@@ -360,10 +360,20 @@ function cartUsed(productId, exceptKey){
 function stockLeft(p){ return (p.stock||0) - cartUsed(p.id); }
 
 /* Chip kategori: klik langsung untuk filter, klik lagi untuk batal */
+const CATEGORY_ORDER = ['tembakau','busa','kertas','cengkeh','lem','cetakan','selongsong','pipa'];
+function categoryRank(name){
+  const n = (name||'').toLowerCase();
+  const idx = CATEGORY_ORDER.findIndex(k=>n.includes(k));
+  return idx===-1 ? CATEGORY_ORDER.length : idx;
+}
+function sortedCategories(){
+  return [...STATE.categories].sort((a,b)=> categoryRank(a.name)-categoryRank(b.name) || a.name.localeCompare(b.name,'id'));
+}
+
 function renderPosCats(){
   const box = document.getElementById('posCatRow');
   if(!box) return;
-  const all = [{id:'', name:'Semua Kategori'}, ...STATE.categories];
+  const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories()];
   box.innerHTML = all.map(c=>{
     const active = (STATE.posCat||'') === c.id;
     return `<button class="tabbtn ${active?'active':''}" data-catchip="${c.id}" style="white-space:nowrap;flex:none;">${esc(c.name)}</button>`;
