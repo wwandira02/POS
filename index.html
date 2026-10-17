@@ -986,7 +986,7 @@ function renderLaporan(){
   document.getElementById('rContent').onclick = (e)=>{
     const tr = e.target.closest('[data-sale]'); if(!tr) return;
     const sl = (window.__lastReport?.sales||[]).find(x=>x.id===tr.dataset.sale);
-    if(sl) openSaleDetail(sl, true);
+    if(sl) openSaleDetail(sl, true, loadLaporan);
   };
   loadLaporan();
 }
@@ -1054,7 +1054,17 @@ async function loadLaporan(){
   </div>`;
 }
 
-async function openSaleDetail(sale, showProfit){
+/* Cari gram per-satuan dari nama item curah, mis. "SAMSU (1 ons)" -> cocokkan ke sell_options produk saat ini */
+function gramFromSaleItem(item, product){
+  if(!product || !product.is_bulk) return 1;
+  const m = String(item.product_name||'').match(/\(([^)]+)\)\s*$/);
+  if(!m) return null;
+  const opt = optsOf(product).find(o=>o.label===m[1]);
+  return opt ? Number(opt.gram) : null;
+}
+
+async function openSaleDetail(sale, showProfit, onChanged){
+  const isOwner = STATE.session.staff.role==='owner';
   const bg = modalShell('Detail Penjualan', `<div id="saleBody" style="font-size:13px;color:var(--text-dim);">Memuat...</div>`);
   const {data:items, error} = await sb.from('sale_items').select('*').eq('sale_id', sale.id);
   const box = bg.querySelector('#saleBody');
@@ -1077,7 +1087,171 @@ async function openSaleDetail(sale, showProfit){
     ${row('Metode', esc(sale.payment_method))}
     ${sale.payment_method==='Tunai' ? row('Dibayar', fmtIDR(sale.paid))+row('Kembalian', fmtIDR(sale.change_amount)) : ''}
     ${showProfit ? row('Total laba', `<b style="color:var(--accent);">${fmtIDR(laba)}</b>`) : ''}
-    ${sale.note ? `<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">Catatan: ${esc(sale.note)}</div>` : ''}`;
+    ${sale.note ? `<div style="margin-top:8px;font-size:12px;color:var(--text-dim);">Catatan: ${esc(sale.note)}</div>` : ''}
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <button class="btn btn-ghost" id="saleBtnEdit" style="flex:1;">Edit Transaksi</button>
+      ${isOwner?`<button class="btn btn-danger" id="saleBtnDel" style="flex:1;">Hapus Transaksi</button>`:''}
+    </div>`;
+  box.querySelector('#saleBtnEdit').onclick = ()=>{ bg.remove(); openSaleEditor(sale, its, onChanged); };
+  const delBtn = box.querySelector('#saleBtnDel');
+  if(delBtn) delBtn.onclick = async ()=>{
+    if(!confirm('Hapus transaksi ini? Stok produk yang terjual akan dikembalikan. Tindakan ini tidak bisa dibatalkan.')) return;
+    delBtn.disabled = true; delBtn.textContent='Menghapus...';
+    try{ await deleteSale(sale, its); bg.remove(); if(onChanged) onChanged(); }
+    catch(err){ alert('Gagal menghapus: '+err.message); delBtn.disabled=false; delBtn.textContent='Hapus Transaksi'; }
+  };
+}
+
+async function deleteSale(sale, its){
+  for(const x of its){
+    const p = STATE.products.find(y=>y.id===x.product_id);
+    if(p){
+      const per = gramFromSaleItem(x, p);
+      if(per){
+        const {data:cur} = await sb.from('products').select('stock').eq('id', p.id).single();
+        const newStock = Number(cur?.stock ?? p.stock) + Number(x.qty)*per;
+        await sb.from('products').update({stock:newStock}).eq('id', p.id);
+        await sb.from('stock_history').insert({product_id:p.id, branch_id:sale.branch_id, change_qty:Number(x.qty)*per, type:'void_sale', note:'Hapus transaksi #'+sale.id.slice(0,8)});
+      }
+    }
+  }
+  await sb.from('sale_items').delete().eq('sale_id', sale.id);
+  const {error} = await sb.from('sales').delete().eq('id', sale.id);
+  if(error) throw error;
+  await loadProducts();
+}
+
+/* ---- Editor transaksi: ubah qty/diskon/hapus item, catatan & metode bayar ---- */
+function openSaleEditor(sale, its, onChanged){
+  const rowsHtml = (list)=> list.map((x,i)=>{
+    const p = STATE.products.find(y=>y.id===x.product_id);
+    const per = gramFromSaleItem(x, p);
+    const editableQty = !!per; // kalau tidak bisa dipetakan ke stok, qty dikunci supaya aman
+    return `<div class="seRow" data-i="${i}" style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;font-size:12.5px;white-space:normal;">${esc(x.product_name)}</div>
+        <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(x.price)} / satuan${editableQty?'':' · qty terkunci (produk/takaran tidak ditemukan)'}</div>
+      </div>
+      <input type="number" min="0" value="${x.qty}" data-seqty ${editableQty?'':'disabled'} style="width:56px;padding:5px 6px;text-align:center;">
+      <input type="number" min="0" value="${x.discount||0}" data-sedisc placeholder="Disk" style="width:66px;padding:5px 6px;">
+      <button type="button" class="btn btn-danger se-del" style="padding:5px 8px;">✕</button>
+    </div>`;
+  }).join('');
+
+  const bg = modalShell('Edit Transaksi', `
+    <div id="seList">${rowsHtml(its) || '<p style="color:var(--text-faint);font-size:12.5px;">Tidak ada item.</p>'}</div>
+    <div style="border-top:1px solid var(--border);margin:10px 0;padding-top:10px;display:flex;flex-direction:column;gap:8px;">
+      <input id="se_note" placeholder="Catatan (opsional)" value="${esc(sale.note||'')}">
+      <div style="display:flex;gap:8px;">
+        <button class="tabbtn ${sale.payment_method==='Tunai'?'active':''}" data-sepay="Tunai" style="flex:1;">Tunai</button>
+        <button class="tabbtn ${sale.payment_method==='QRIS/Transfer'?'active':''}" data-sepay="QRIS/Transfer" style="flex:1;">QRIS/Transfer</button>
+      </div>
+      <div id="se_cashRow" style="${sale.payment_method==='Tunai'?'':'display:none;'}">
+        <label style="font-size:12.5px;color:var(--text-dim);">Uang diterima</label>
+        <input id="se_cash" type="number" min="0" value="${sale.paid||0}" style="width:100%;margin-top:4px;">
+      </div>
+      <div id="se_summary" style="background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:13px;"></div>
+      <p id="se_err" style="color:var(--danger);font-size:12.5px;display:none;"></p>
+      <button class="btn btn-primary" id="se_save" style="margin-top:4px;">Simpan Perubahan</button>
+    </div>`);
+
+  let payMethod = sale.payment_method;
+  bg.querySelectorAll('.seRow .se-del').forEach(b=>b.onclick=()=>{ b.closest('.seRow').remove(); updateSummary(); });
+  bg.querySelector('#seList').addEventListener('input', updateSummary);
+  bg.querySelectorAll('[data-sepay]').forEach(b=>b.onclick=()=>{
+    payMethod = b.dataset.sepay;
+    bg.querySelectorAll('[data-sepay]').forEach(x=>x.classList.toggle('active', x.dataset.sepay===payMethod));
+    bg.querySelector('#se_cashRow').style.display = payMethod==='Tunai' ? '' : 'none';
+    updateSummary();
+  });
+  bg.querySelector('#se_cash').oninput = updateSummary;
+
+  function currentRows(){
+    return [...bg.querySelectorAll('.seRow')].map(r=>({
+      idx: Number(r.dataset.i),
+      qty: Number(r.querySelector('[data-seqty]').value)||0,
+      discount: Number(r.querySelector('[data-sedisc]').value)||0,
+    }));
+  }
+  function calcTotals(){
+    const rows = currentRows();
+    const subtotal = rows.reduce((s,r)=> s + Number(its[r.idx].price)*r.qty, 0);
+    const discTotal = rows.reduce((s,r)=> s + r.discount, 0);
+    const total = Math.max(0, subtotal-discTotal);
+    return {rows, subtotal, discTotal, total};
+  }
+  function updateSummary(){
+    const {subtotal, discTotal, total} = calcTotals();
+    const cash = Number(bg.querySelector('#se_cash')?.value)||0;
+    bg.querySelector('#se_summary').innerHTML = `
+      <div style="display:flex;justify-content:space-between;"><span style="color:var(--text-dim);">Subtotal</span><span>${fmtIDR(subtotal)}</span></div>
+      <div style="display:flex;justify-content:space-between;"><span style="color:var(--text-dim);">Diskon</span><span>${fmtIDR(discTotal)}</span></div>
+      <div style="display:flex;justify-content:space-between;font-weight:800;"><span>Total</span><span style="color:var(--accent);">${fmtIDR(total)}</span></div>
+      ${payMethod==='Tunai' ? `<div style="display:flex;justify-content:space-between;"><span style="color:var(--text-dim);">Kembalian</span><span>${fmtIDR(Math.max(0,cash-total))}</span></div>` : ''}`;
+  }
+  updateSummary();
+
+  bg.querySelector('#se_save').onclick = async ()=>{
+    const err = bg.querySelector('#se_err'); err.style.display='none';
+    const {rows, subtotal, discTotal, total} = calcTotals();
+    const cash = Number(bg.querySelector('#se_cash')?.value)||0;
+    if(payMethod==='Tunai' && cash < total){ err.textContent='Uang diterima kurang dari total.'; err.style.display='block'; return; }
+
+    // hitung perubahan stok per produk (gram/pcs)
+    const delta = {}; // product_id -> perubahan stok (+ berarti dikembalikan ke stok)
+    const keptIdx = new Set(rows.map(r=>r.idx));
+    its.forEach((x,i)=>{
+      const p = STATE.products.find(y=>y.id===x.product_id);
+      const per = gramFromSaleItem(x, p);
+      if(!per) return; // tidak diketahui -> tidak diotak-atik stoknya
+      if(!keptIdx.has(i)){
+        delta[x.product_id] = (delta[x.product_id]||0) + Number(x.qty)*per; // dihapus -> kembalikan semua
+      }
+    });
+    rows.forEach(r=>{
+      const x = its[r.idx];
+      const p = STATE.products.find(y=>y.id===x.product_id);
+      const per = gramFromSaleItem(x, p);
+      if(!per) return;
+      const diffQty = Number(x.qty) - r.qty; // qty lama - qty baru -> + berarti dikembalikan
+      delta[x.product_id] = (delta[x.product_id]||0) + diffQty*per;
+    });
+
+    const btn = bg.querySelector('#se_save'); btn.disabled=true; btn.textContent='Menyimpan...';
+    try{
+      // validasi & terapkan perubahan stok
+      for(const pid of Object.keys(delta)){
+        const {data:cur, error:ce} = await sb.from('products').select('stock,name').eq('id', pid).single();
+        if(ce) throw ce;
+        const newStock = Number(cur.stock) + delta[pid];
+        if(newStock < 0) throw new Error('Stok "'+cur.name+'" tidak cukup untuk perubahan ini.');
+        await sb.from('products').update({stock:newStock}).eq('id', pid);
+        if(delta[pid]!==0) await sb.from('stock_history').insert({product_id:pid, branch_id:sale.branch_id, change_qty:delta[pid], type:'edit_sale', note:'Edit transaksi #'+sale.id.slice(0,8)});
+      }
+      // hapus item yang dibuang
+      for(let i=0;i<its.length;i++){
+        if(!keptIdx.has(i)) await sb.from('sale_items').delete().eq('id', its[i].id);
+      }
+      // update item yang tersisa
+      for(const r of rows){
+        const x = its[r.idx];
+        await sb.from('sale_items').update({qty:r.qty, discount:r.discount}).eq('id', x.id);
+      }
+      // update header sales
+      await sb.from('sales').update({
+        subtotal, discount_total: discTotal, total,
+        payment_method: payMethod,
+        paid: payMethod==='Tunai' ? cash : total,
+        change_amount: payMethod==='Tunai' ? Math.max(0,cash-total) : 0,
+        note: bg.querySelector('#se_note').value,
+      }).eq('id', sale.id);
+
+      await loadProducts();
+      bg.remove();
+      if(onChanged) onChanged();
+    }catch(e){ err.textContent = e.message; err.style.display='block'; }
+    finally{ btn.disabled=false; btn.textContent='Simpan Perubahan'; }
+  };
 }
 
 function exportLaporanCSV(r){
@@ -1202,7 +1376,7 @@ async function renderRiwayatSaya(){
   const el = document.getElementById('mainContent');
   el.innerHTML = pageHeader('Riwayat Transaksi Saya') + `<div class="card scrollx" id="myHist">Memuat...</div>`;
   const {data} = await sb.from('sales').select('*').eq('staff_id', STATE.session.staff.id).order('created_at',{ascending:false}).limit(100);
-  document.getElementById('myHist').onclick = (e)=>{ const tr=e.target.closest('[data-sale]'); if(!tr) return; const sl=(data||[]).find(x=>x.id===tr.dataset.sale); if(sl) openSaleDetail(sl,false); };
+  document.getElementById('myHist').onclick = (e)=>{ const tr=e.target.closest('[data-sale]'); if(!tr) return; const sl=(data||[]).find(x=>x.id===tr.dataset.sale); if(sl) openSaleDetail(sl,false,renderRiwayatSaya); };
   document.getElementById('myHist').innerHTML = `<table><thead><tr><th>Tanggal</th><th>Total</th><th>Metode</th><th>Catatan</th></tr></thead><tbody>
     ${(data||[]).map(s=>`<tr class="clickrow" data-sale="${s.id}"><td>${fmtDateTime(s.created_at)}</td><td style="font-weight:700;">${fmtIDR(s.total)}</td><td>${esc(s.payment_method)}</td><td>${esc(s.note||'-')}</td></tr>`).join('') || `<tr><td colspan="4" style="text-align:center;padding:30px;color:var(--text-faint);">Belum ada transaksi.</td></tr>`}
   </tbody></table>`;
