@@ -104,7 +104,7 @@ let STATE = {
   branches: [], categories: [], brands: [], units: [], distributors: [],
   products: [], cart: [], page: 'pos',
   txDiscount: 0, note: '', payMethod: 'Tunai',
-  posCat: null, posBrand: null,
+  posCat: null, posBrand: null, prodCat: null, prodBrand: null,
 };
 
 function fmtIDR(n){ n = Number(n)||0; return 'Rp' + n.toLocaleString('id-ID',{maximumFractionDigits:0}); }
@@ -272,7 +272,7 @@ function renderShell(){
   document.querySelectorAll('[data-nav]').forEach(el=>el.onclick=()=>{ STATE.page = el.dataset.nav; renderShell(); });
   document.getElementById('btnLogout').onclick = logout;
   const bs = document.getElementById('branchSwitch');
-  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); STATE.cart=[]; STATE.posCat=null; STATE.posBrand=null; await loadProducts(); renderShell(); };
+  if(bs) bs.onchange = async ()=>{ STATE.activeBranchId = bs.value||null; localStorage.setItem('rt_active_branch', STATE.activeBranchId||''); STATE.cart=[]; STATE.posCat=null; STATE.posBrand=null; STATE.prodCat=null; STATE.prodBrand=null; await loadProducts(); renderShell(); };
   const btnMenu = document.getElementById('btnMenu');
   function toggleSidebar(force){
     const open = typeof force==='boolean' ? force : !document.getElementById('sidebar').classList.contains('open');
@@ -587,10 +587,12 @@ function renderProduk(){
   const el = document.getElementById('mainContent');
   const lowStock = STATE.products.filter(p=>p.stock<=p.min_stock);
   el.innerHTML = pageHeader('Produk', 'Kelola daftar produk & stok'+(STATE.activeBranchId?'':' — semua cabang (read-only, pilih cabang untuk mengelola)')) + `
-  <div style="display:flex;justify-content:flex-end;margin-bottom:12px;gap:8px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
     <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
     ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
   </div>
+  <div id="prodCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
+  <div id="prodBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
   <div class="card scrollx" style="margin-bottom:20px;">
     <table><thead><tr><th>Produk</th><th>Merek</th><th>Kategori</th><th>Satuan</th><th>Harga Beli</th><th>Harga Jual</th><th>Laba</th><th>Stok</th><th>Min</th><th>Status</th><th>Aksi</th></tr></thead>
     <tbody id="prodTbody"></tbody></table>
@@ -600,11 +602,8 @@ function renderProduk(){
   ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
   </tbody></table></div>` : ''}`;
 
-  function draw(){
-    const s = (document.getElementById('prodSearch').value||'').toLowerCase();
-    const list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
-    document.getElementById('prodTbody').innerHTML = list.map(p=>`
-      <tr>
+  function rowHtml(p){
+    return `<tr>
         <td style="font-weight:600;">${esc(p.name)}</td>
         <td>${esc(p.brands?.name||'-')}</td>
         <td>${esc(p.categories?.name||'-')}</td>
@@ -622,13 +621,75 @@ function renderProduk(){
             <button class="btn btn-danger" data-hapus="${p.id}" style="padding:5px 8px;">Hapus</button>`:''}
           </div>
         </td>
-      </tr>`).join('') || `<tr><td colspan="11" style="text-align:center;color:var(--text-faint);padding:30px;">Belum ada produk.</td></tr>`;
+      </tr>`;
+  }
+
+  function draw(){
+    const s = (document.getElementById('prodSearch').value||'').toLowerCase();
+    let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
+    if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
+    if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
+
+    if(!list.length){
+      document.getElementById('prodTbody').innerHTML = `<tr><td colspan="11" style="text-align:center;color:var(--text-faint);padding:30px;">Belum ada produk.</td></tr>`;
+    } else if(STATE.prodBrand){
+      document.getElementById('prodTbody').innerHTML = list.map(rowHtml).join('');
+    } else {
+      const groups = {}; const order = [];
+      list.forEach(p=>{ const key = p.brand_id || '__none__'; if(!groups[key]){ groups[key]=[]; order.push(key); } groups[key].push(p); });
+      order.sort((a,b)=>{
+        if(a==='__none__') return 1; if(b==='__none__') return -1;
+        const na = STATE.brands.find(x=>x.id===a)?.name||''; const nb = STATE.brands.find(x=>x.id===b)?.name||'';
+        return na.localeCompare(nb,'id');
+      });
+      document.getElementById('prodTbody').innerHTML = order.map(key=>{
+        const name = key==='__none__' ? 'Tanpa Merek' : (STATE.brands.find(x=>x.id===key)?.name || '-');
+        return `<tr><td colspan="11" style="background:var(--surface-2);font-weight:800;font-size:12px;letter-spacing:.02em;text-transform:uppercase;color:var(--text-dim);">${esc(name)}</td></tr>`
+          + groups[key].map(rowHtml).join('');
+      }).join('');
+    }
     document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openProductModal(b.dataset.edit));
     document.querySelectorAll('[data-hapus]').forEach(b=>b.onclick=()=>deleteProduct(b.dataset.hapus));
     document.querySelectorAll('[data-stock]').forEach(b=>b.onclick=()=>openStockModal(b.dataset.stock));
   }
+
+  function drawProdCats(){
+    const box = document.getElementById('prodCatRow');
+    const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories()];
+    box.innerHTML = all.map(c=>{
+      const active = (STATE.prodCat||'') === c.id;
+      return `<button class="tabbtn ${active?'active':''}" data-pcatchip="${c.id}" style="white-space:nowrap;flex:none;">${esc(c.name)}</button>`;
+    }).join('');
+    box.querySelectorAll('[data-pcatchip]').forEach(b=>b.onclick=()=>{
+      const id = b.dataset.pcatchip;
+      STATE.prodCat = (STATE.prodCat||'')===id ? null : (id||null);
+      STATE.prodBrand = null;
+      drawProdCats(); drawProdBrands(); draw();
+    });
+    drawProdBrands();
+  }
+  function drawProdBrands(){
+    const box = document.getElementById('prodBrandRow');
+    if(!STATE.prodCat){ box.style.display='none'; box.innerHTML=''; return; }
+    const idsHere = new Set(STATE.products.filter(p=>p.category_id===STATE.prodCat && p.brand_id).map(p=>p.brand_id));
+    const brandsHere = STATE.brands.filter(b=>idsHere.has(b.id));
+    if(!brandsHere.length){ box.style.display='none'; box.innerHTML=''; return; }
+    box.style.display='flex';
+    const all = [{id:'', name:'Semua Merek'}, ...brandsHere];
+    box.innerHTML = all.map(b=>{
+      const active = (STATE.prodBrand||'') === b.id;
+      return `<button class="tabbtn ${active?'active':''}" data-pbrandchip="${b.id}" style="white-space:nowrap;flex:none;">${esc(b.name)}</button>`;
+    }).join('');
+    box.querySelectorAll('[data-pbrandchip]').forEach(b=>b.onclick=()=>{
+      const id = b.dataset.pbrandchip;
+      STATE.prodBrand = (STATE.prodBrand||'')===id ? null : (id||null);
+      drawProdBrands(); draw();
+    });
+  }
+
   document.getElementById('prodSearch').oninput = draw;
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
+  drawProdCats();
   draw();
 }
 
