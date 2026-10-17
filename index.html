@@ -332,6 +332,10 @@ function renderPOS(){
         <div id="posCashRow" style="${STATE.payMethod==='Tunai'?'':'display:none;'}">
           <label style="font-size:12.5px;color:var(--text-dim);">Uang diterima</label>
           <input id="posCash" type="number" min="0" style="width:100%;margin-top:4px;" placeholder="Rp">
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+            ${[100000,50000,10000,5000,1000].map(n=>`<button type="button" class="btn btn-ghost posCashBtn" data-cashadd="${n}" style="flex:1;min-width:52px;padding:6px 4px;font-size:12px;">${n>=1000?(n/1000)+'rb':n}</button>`).join('')}
+            <button type="button" class="btn btn-ghost" id="posCashClear" style="padding:6px 8px;font-size:12px;" title="Kosongkan">✕</button>
+          </div>
         </div>
         <div style="background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:13px;display:flex;flex-direction:column;gap:5px;" id="posSummary"></div>
         <div style="display:flex;gap:8px;margin-top:4px;">
@@ -347,6 +351,12 @@ function renderPOS(){
   document.getElementById('posDiscTx').oninput = e=>{ STATE.txDiscount = Number(e.target.value)||0; renderCartSummary(); };
   document.getElementById('posNote').oninput = e=> STATE.note = e.target.value;
   const cashEl = document.getElementById('posCash'); if(cashEl) cashEl.oninput = renderCartSummary;
+  document.querySelectorAll('[data-cashadd]').forEach(b=>b.onclick=()=>{
+    const cur = Number(cashEl.value)||0;
+    cashEl.value = cur + Number(b.dataset.cashadd);
+    renderCartSummary();
+  });
+  const cashClear = document.getElementById('posCashClear'); if(cashClear) cashClear.onclick=()=>{ cashEl.value=''; renderCartSummary(); };
   document.getElementById('btnClearCart').onclick = ()=>{ STATE.cart=[]; STATE.txDiscount=0; STATE.note=''; renderPOS(); };
   document.getElementById('btnSaveSale').onclick = saveSale;
   renderPosCats();
@@ -585,7 +595,6 @@ async function saveSale(){
    ================================================================ */
 function renderProduk(){
   const el = document.getElementById('mainContent');
-  const lowStock = STATE.products.filter(p=>p.stock<=p.min_stock);
   el.innerHTML = pageHeader('Produk', 'Kelola daftar produk & stok'+(STATE.activeBranchId?'':' — semua cabang (read-only, pilih cabang untuk mengelola)')) + `
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
     <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
@@ -597,10 +606,7 @@ function renderProduk(){
     <table><thead><tr><th>Produk</th><th>Merek</th><th>Kategori</th><th>Satuan</th><th>Harga Beli</th><th>Harga Jual</th><th>Laba</th><th>Stok</th><th>Min</th><th>Status</th><th>Aksi</th></tr></thead>
     <tbody id="prodTbody"></tbody></table>
   </div>
-  ${lowStock.length? `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${lowStock.length})</h3>
-  <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Merek</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
-  ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.brands?.name||'-')}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
-  </tbody></table></div>` : ''}`;
+  <div id="lowStockSection"></div>`;
 
   function rowHtml(p){
     return `<tr>
@@ -653,6 +659,18 @@ function renderProduk(){
     document.querySelectorAll('[data-stock]').forEach(b=>b.onclick=()=>openStockModal(b.dataset.stock));
   }
 
+  function drawLowStock(){
+    let list = STATE.products.filter(p=>p.stock<=p.min_stock);
+    if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
+    if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
+    const sec = document.getElementById('lowStockSection');
+    if(!list.length){ sec.innerHTML=''; return; }
+    sec.innerHTML = `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${list.length})</h3>
+    <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Merek</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
+    ${list.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.brands?.name||'-')}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
+    </tbody></table></div>`;
+  }
+
   function drawProdCats(){
     const box = document.getElementById('prodCatRow');
     const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories()];
@@ -664,7 +682,7 @@ function renderProduk(){
       const id = b.dataset.pcatchip;
       STATE.prodCat = (STATE.prodCat||'')===id ? null : (id||null);
       STATE.prodBrand = null;
-      drawProdCats(); drawProdBrands(); draw();
+      drawProdCats(); drawProdBrands(); draw(); drawLowStock();
     });
     drawProdBrands();
   }
@@ -683,7 +701,7 @@ function renderProduk(){
     box.querySelectorAll('[data-pbrandchip]').forEach(b=>b.onclick=()=>{
       const id = b.dataset.pbrandchip;
       STATE.prodBrand = (STATE.prodBrand||'')===id ? null : (id||null);
-      drawProdBrands(); draw();
+      drawProdBrands(); draw(); drawLowStock();
     });
   }
 
@@ -691,6 +709,7 @@ function renderProduk(){
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
   drawProdCats();
   draw();
+  drawLowStock();
 }
 
 function modalShell(title, bodyHtml){
