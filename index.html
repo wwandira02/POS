@@ -598,8 +598,8 @@ function renderProduk(){
     <tbody id="prodTbody"></tbody></table>
   </div>
   ${lowStock.length? `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${lowStock.length})</h3>
-  <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
-  ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
+  <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Merek</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
+  ${lowStock.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.brands?.name||'-')}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
   </tbody></table></div>` : ''}`;
 
   function rowHtml(p){
