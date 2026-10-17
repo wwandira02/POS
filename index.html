@@ -1309,18 +1309,31 @@ async function drawStaffTable(){
   const {data, error} = await sb.from('staff').select('*').order('role').order('name');
   const box = document.getElementById('staffTable');
   if(error){ box.innerHTML = `<div style="padding:20px;color:var(--danger);">Gagal memuat: ${esc(error.message)}</div>`; return; }
-  box.innerHTML = `<table><thead><tr><th>Nama</th><th>Username</th><th>Role</th><th>Cabang</th><th>Aksi</th></tr></thead><tbody>
+  box.innerHTML = `<table><thead><tr><th>Nama</th><th>Username</th><th>Password</th><th>Role</th><th>Cabang</th><th>Aksi</th></tr></thead><tbody>
     ${(data||[]).map(s=>`<tr>
       <td style="font-weight:600;">${esc(s.name)}</td>
       <td>${esc(s.username)}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span class="pwMask" data-pw="${esc(s.password||'')}" style="font-family:monospace;">••••••••</span>
+          <button type="button" class="btn btn-ghost pwToggle" style="padding:3px 7px;font-size:11px;">👁</button>
+        </div>
+      </td>
       <td>${s.role==='owner'?'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Owner</span>':'<span class="pill" style="background:var(--surface-2);color:var(--text-dim);">Kasir</span>'}</td>
       <td>${esc(branchName(s.branch_id))}</td>
       <td><div style="display:flex;gap:4px;">
         <button class="btn btn-ghost" data-editS="${s.id}" style="padding:5px 8px;">Edit</button>
         ${s.id!==STATE.session.staff.id ? `<button class="btn btn-danger" data-delS="${s.id}" style="padding:5px 8px;">Hapus</button>` : ''}
       </div></td>
-    </tr>`).join('') || `<tr><td colspan="5" style="text-align:center;padding:30px;color:var(--text-faint);">Belum ada akun.</td></tr>`}
+    </tr>`).join('') || `<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-faint);">Belum ada akun.</td></tr>`}
   </tbody></table>`;
+  box.querySelectorAll('.pwToggle').forEach(b=>b.onclick=()=>{
+    const span = b.previousElementSibling;
+    const shown = span.dataset.shown==='1';
+    span.textContent = shown ? '••••••••' : (span.dataset.pw || '(kosong)');
+    span.dataset.shown = shown ? '0' : '1';
+    b.textContent = shown ? '👁' : '🙈';
+  });
   box.querySelectorAll('[data-editS]').forEach(b=>b.onclick=async()=>{
     const {data:s} = await sb.from('staff').select('*').eq('id', b.dataset.edits).single();
     openStaffModal(s);
