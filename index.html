@@ -57,6 +57,7 @@ td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:13.5px;whit
 tr:last-child td{border-bottom:none;}
 .scrollx{overflow-x:auto;}
 #mainWrap{margin-left:230px;}
+.posMasonry{column-width:168px;column-gap:10px;}
 .posCard{display:inline-block;width:100%;transition:border-color .12s;}
 .posCardItem:hover{border-color:var(--accent);}
 .posOptRow:hover:not(.disabled){background:var(--accent-dim);}
@@ -313,7 +314,7 @@ function renderPOS(){
       <input id="posSearch" placeholder="Cari produk..." style="width:100%;margin-bottom:10px;">
       <div id="posCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
       <div id="posBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
-      <div id="posProdList" style="column-width:168px;column-gap:10px;max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;"></div>
+      <div id="posProdList" style="max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;"></div>
     </div>
     <div class="card" style="padding:16px;position:sticky;top:80px;width:100%;">
       <h3 style="font-size:15px;font-weight:800;margin-bottom:10px;">Keranjang</h3>
@@ -408,6 +409,36 @@ function renderPosBrands(){
   });
 }
 
+function posCardHtml(p){
+  const status = p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'');
+  if(p.is_bulk){
+    const left = stockLeft(p);
+    return `
+    <div class="posCard" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:11px;background:var(--surface);">
+      <div style="font-weight:700;font-size:13px;">${esc(p.name)}</div>
+      <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:7px;">Stok ${esc(fmtStock(p))} ${status}</div>
+      <div style="display:flex;flex-direction:column;gap:5px;">
+        ${optsOf(p).map((o,i)=>{
+          const disabled = Number(o.gram) > left;
+          return `<div class="posOptRow ${disabled?'disabled':''}" data-bulk="${p.id}" data-opt="${i}" style="display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border-radius:7px;background:var(--surface-2);${disabled?'opacity:.4;cursor:not-allowed;':'cursor:pointer;'}">
+            <span style="font-size:12px;font-weight:600;">${esc(o.label)}</span>
+            <span style="font-size:12px;color:var(--accent);font-weight:700;">${fmtIDR(o.price)}</span>
+          </div>`;
+        }).join('') || '<div style="font-size:11px;color:var(--text-faint);">Belum ada takaran jual.</div>'}
+      </div>
+    </div>`;
+  }
+  return `
+  <div class="posCard posCardItem" data-id="${p.id}" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:10px 11px;background:var(--surface);cursor:pointer;">
+    <div style="font-weight:700;font-size:12.5px;">${esc(p.name)}</div>
+    <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:5px;">Stok ${esc(fmtStock(p))}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
+      <span style="font-weight:700;color:var(--accent);font-size:12.5px;">${fmtIDR(p.sell_price)}</span>
+      ${status}
+    </div>
+  </div>`;
+}
+
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
   let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
@@ -415,35 +446,30 @@ function renderPosProducts(){
   if(STATE.posBrand) list = list.filter(p=>p.brand_id===STATE.posBrand);
   const box = document.getElementById('posProdList');
   if(!list.length){ box.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-faint);">Tidak ada produk.</div>`; return; }
-  box.innerHTML = list.map(p=>{
-    const status = p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'');
-    if(p.is_bulk){
-      const left = stockLeft(p);
-      return `
-      <div class="posCard" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:11px;background:var(--surface);">
-        <div style="font-weight:700;font-size:13px;">${esc(p.name)}</div>
-        <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:7px;">${esc(p.brands?.name||'-')} · Stok ${esc(fmtStock(p))} ${status}</div>
-        <div style="display:flex;flex-direction:column;gap:5px;">
-          ${optsOf(p).map((o,i)=>{
-            const disabled = Number(o.gram) > left;
-            return `<div class="posOptRow ${disabled?'disabled':''}" data-bulk="${p.id}" data-opt="${i}" style="display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border-radius:7px;background:var(--surface-2);${disabled?'opacity:.4;cursor:not-allowed;':'cursor:pointer;'}">
-              <span style="font-size:12px;font-weight:600;">${esc(o.label)}</span>
-              <span style="font-size:12px;color:var(--accent);font-weight:700;">${fmtIDR(o.price)}</span>
-            </div>`;
-          }).join('') || '<div style="font-size:11px;color:var(--text-faint);">Belum ada takaran jual.</div>'}
-        </div>
-      </div>`;
-    }
-    return `
-    <div class="posCard posCardItem" data-id="${p.id}" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:10px 11px;background:var(--surface);cursor:pointer;">
-      <div style="font-weight:700;font-size:12.5px;">${esc(p.name)}</div>
-      <div style="font-size:10.5px;color:var(--text-faint);margin-bottom:5px;">${esc(p.brands?.name||'-')}</div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;">
-        <span style="font-weight:700;color:var(--accent);font-size:12.5px;">${fmtIDR(p.sell_price)}</span>
-        ${status}
-      </div>
-    </div>`;
-  }).join('');
+
+  if(STATE.posBrand){
+    // sudah difilter ke satu merek lewat chip — tampilkan langsung, tanpa judul
+    box.innerHTML = `<div class="posMasonry">${list.map(posCardHtml).join('')}</div>`;
+  } else {
+    // kelompokkan otomatis per merek supaya terpisah & rapi
+    const groups = {}; const order = [];
+    list.forEach(p=>{
+      const key = p.brand_id || '__none__';
+      if(!groups[key]){ groups[key]=[]; order.push(key); }
+      groups[key].push(p);
+    });
+    order.sort((a,b)=>{
+      if(a==='__none__') return 1; if(b==='__none__') return -1;
+      const na = STATE.brands.find(x=>x.id===a)?.name||''; const nb = STATE.brands.find(x=>x.id===b)?.name||'';
+      return na.localeCompare(nb,'id');
+    });
+    box.innerHTML = order.map((key,i)=>{
+      const name = key==='__none__' ? 'Tanpa Merek' : (STATE.brands.find(x=>x.id===key)?.name || '-');
+      return `<div style="font-weight:800;font-size:12.5px;letter-spacing:.02em;color:var(--text-dim);margin:${i===0?'2px':'16px'} 2px 8px;text-transform:uppercase;">${esc(name)}</div>
+      <div class="posMasonry">${groups[key].map(posCardHtml).join('')}</div>`;
+    }).join('');
+  }
+
   box.querySelectorAll('.posCardItem').forEach(el=>el.onclick=()=>addToCart(el.dataset.id));
   box.querySelectorAll('[data-bulk]:not(.disabled)').forEach(el=>el.onclick=()=>addToCart(el.dataset.bulk, Number(el.dataset.opt)));
 }
