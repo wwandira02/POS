@@ -861,7 +861,19 @@ function openStockModal(id){
 
 async function deleteProduct(id){
   if(!confirm('Hapus produk ini?')) return;
-  await sb.from('products').delete().eq('id', id);
+  const {data, error} = await sb.from('products').delete().eq('id', id).select();
+  if(error){
+    if(/foreign key|violates|constraint/i.test(error.message)){
+      alert('Produk tidak bisa dihapus karena sudah pernah tercatat di riwayat penjualan atau riwayat stok.\n\nSaran: ubah stoknya jadi 0 saja, atau hapus baris terkait di tabel "sale_items" dan "stock_history" di Supabase dulu baru hapus produknya.');
+    } else {
+      alert('Gagal menghapus produk: '+error.message);
+    }
+    return;
+  }
+  if(!data || !data.length){
+    alert('Produk tidak terhapus. Kemungkinan besar pengaturan keamanan (RLS/Row Level Security) di tabel "products" pada Supabase belum mengizinkan hapus data. Cek menu Authentication/Policies di Supabase untuk tabel products, pastikan ada policy DELETE yang mengizinkan.');
+    return;
+  }
   await loadProducts(); renderProduk();
 }
 
