@@ -124,10 +124,11 @@ function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({"&":"&amp;",
 
 /* ---------- Helper produk curah (stok disimpan dalam GRAM) ---------- */
 function fmtG(g){ g = Number(g)||0; const a = Math.abs(g); return a>=1000 ? (g/1000).toLocaleString('id-ID',{maximumFractionDigits:3})+' kg' : g.toLocaleString('id-ID')+' g'; }
-function fmtStock(p){ return p.is_bulk ? fmtG(p.stock) : (p.stock+' '+(p.units?.name||'')).trim(); }
-function fmtMin(p){ return p.is_bulk ? fmtG(p.min_stock) : p.min_stock; }
+function isPcsBulk(p){ return p.is_bulk && p.bulk_unit==='pcs'; }
+function fmtStock(p){ if(!p.is_bulk) return (p.stock+' '+(p.units?.name||'')).trim(); return isPcsBulk(p) ? (Number(p.stock)||0).toLocaleString('id-ID')+' pcs' : fmtG(p.stock); }
+function fmtMin(p){ if(!p.is_bulk) return p.min_stock; return isPcsBulk(p) ? (Number(p.min_stock)||0) : fmtG(p.min_stock); }
 function optsOf(p){ return Array.isArray(p.sell_options) ? p.sell_options : []; }
-function optCost(p,o){ return Math.round(Number(p.buy_price||0) * Number(o.gram||0) / 1000); } // modal per takaran
+function optCost(p,o){ return isPcsBulk(p) ? Math.round(Number(p.buy_price||0)) : Math.round(Number(p.buy_price||0) * Number(o.gram||0) / 1000); } // modal per takaran
 
 /* ---------------- THEME ---------------- */
 function applyTheme(){
@@ -490,9 +491,9 @@ function addToCart(id, optIdx){
   let per=1, price=p.sell_price, buy=p.buy_price, name=p.name, key=id;
   if(p.is_bulk){
     const o = optsOf(p)[optIdx]; if(!o) return;
-    per = Number(o.gram); price = Number(o.price)||0;
-    buy = Math.round(Number(p.buy_price||0) * per / 1000); // harga beli per kg -> per takaran
-    name = `${p.name} (${o.label})`; key = id+':'+per;
+    per = Number(o.gram)||1; price = Number(o.price)||0;
+    buy = optCost(p,o); // harga modal per takaran (per kg utk curah berat, per pcs utk curah satuan)
+    name = `${p.name} (${o.label})`; key = id+':'+optIdx;
   }
   if(stockLeft(p) < per) return;
   const existing = STATE.cart.find(c=>c.key===key);
@@ -564,9 +565,9 @@ async function saveSale(){
     // Cek stok terbaru dari database sebelum menyimpan
     const fresh = {};
     for(const pid of Object.keys(need)){
-      const {data:fp, error:fe} = await sb.from('products').select('name, stock, is_bulk').eq('id', pid).single();
+      const {data:fp, error:fe} = await sb.from('products').select('name, stock, is_bulk, bulk_unit').eq('id', pid).single();
       if(fe) throw fe;
-      if(Number(fp.stock) < need[pid]) throw new Error('Stok "'+fp.name+'" tidak cukup (sisa '+(fp.is_bulk?fmtG(fp.stock):fp.stock)+').');
+      if(Number(fp.stock) < need[pid]) throw new Error('Stok "'+fp.name+'" tidak cukup (sisa '+fmtStock(fp)+').');
       fresh[pid] = fp;
     }
     const {data: sale, error} = await sb.from('sales').insert({
@@ -613,8 +614,8 @@ function renderProduk(){
         <td style="font-weight:600;">${esc(p.name)}</td>
         <td>${esc(p.brands?.name||'-')}</td>
         <td>${esc(p.categories?.name||'-')}</td>
-        <td>${p.is_bulk?'Curah (gram)':esc(p.units?.name||'-')}</td>
-        <td>${fmtIDR(p.buy_price)}${p.is_bulk?' /kg':''}</td>
+        <td>${p.is_bulk?(isPcsBulk(p)?'Curah (pcs)':'Curah (berat)'):esc(p.units?.name||'-')}</td>
+        <td>${fmtIDR(p.buy_price)}${p.is_bulk?(isPcsBulk(p)?' /pcs':' /kg'):''}</td>
         <td style="${p.is_bulk?'white-space:normal;font-size:12px;min-width:150px;':''}">${p.is_bulk ? (optsOf(p).map(o=>esc(o.label)+': '+fmtIDR(o.price)).join('<br>')||'-') : fmtIDR(p.sell_price)}</td>
         <td style="color:var(--accent);font-weight:600;${p.is_bulk?'white-space:normal;font-size:12px;min-width:90px;':''}">${p.is_bulk ? (optsOf(p).map(o=>fmtIDR(Number(o.price)-optCost(p,o))).join('<br>')||'-') : fmtIDR(p.sell_price-p.buy_price)}</td>
         <td>${esc(fmtStock(p))}</td>
@@ -731,6 +732,7 @@ const DEFAULT_OPTS = [
   {label:'1 ons', gram:100, price:0},
   {label:'½ ons', gram:50, price:0},
 ];
+const DEFAULT_OPTS_PCS = [{label:'', price:0}, {label:'', price:0}];
 
 function optRowHtml(o){
   return `<div class="optRow" style="display:flex;gap:6px;margin-bottom:6px;">
@@ -740,11 +742,19 @@ function optRowHtml(o){
     <button type="button" class="btn btn-danger o_del" style="padding:5px 9px;">✕</button>
   </div>`;
 }
+function optRowHtmlPcs(o){
+  return `<div class="optRowPcs" style="display:flex;gap:6px;margin-bottom:6px;">
+    <input class="op_label" placeholder="Nama varian (mis. Surya biasa)" value="${esc(o.label||'')}" style="flex:1.4;min-width:0;">
+    <input class="op_price" type="number" min="0" placeholder="Harga jual" value="${o.price||''}" style="flex:1;min-width:0;">
+    <button type="button" class="btn btn-danger op_del" style="padding:5px 9px;">✕</button>
+  </div>`;
+}
 
 function openProductModal(id){
   const p = id ? STATE.products.find(x=>x.id===id) : null;
   const isBulk = !!p?.is_bulk;
-  const opts = isBulk ? optsOf(p) : DEFAULT_OPTS;
+  const bulkKind = p?.bulk_unit==='pcs' ? 'pcs' : 'berat';
+  const opts = isBulk ? optsOf(p) : (bulkKind==='pcs' ? DEFAULT_OPTS_PCS : DEFAULT_OPTS);
   const bg = modalShell(p?'Edit Produk':'Tambah Produk', `
     <div style="display:flex;flex-direction:column;gap:10px;">
       <div><label style="font-size:12px;color:var(--text-dim);">Nama Produk</label><input id="f_name" value="${esc(p?.name||'')}" style="width:100%;margin-top:4px;"></div>
@@ -755,7 +765,7 @@ function openProductModal(id){
 
       <label style="display:flex;gap:8px;align-items:flex-start;background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:12.5px;cursor:${p?'not-allowed':'pointer'};">
         <input type="checkbox" id="f_bulk" ${isBulk?'checked':''} ${p?'disabled':''} style="margin-top:2px;">
-        <span><b>Produk curah</b> — stok disimpan 1 angka (gram), dijual eceran per kg / ons / ½ ons.${p?'<br><i style="color:var(--text-faint);">Jenis produk tidak bisa diubah setelah dibuat.</i>':''}</span>
+        <span><b>Produk curah</b> — stok dipakai bersama untuk beberapa pilihan harga (per kg/ons, atau per pcs/satuan).${p?'<br><i style="color:var(--text-faint);">Jenis produk tidak bisa diubah setelah dibuat.</i>':''}</span>
       </label>
 
       <!-- PRODUK BIASA -->
@@ -773,18 +783,54 @@ function openProductModal(id){
 
       <!-- PRODUK CURAH -->
       <div id="sec_bulk" style="display:${isBulk?'flex':'none'};flex-direction:column;gap:10px;">
-        <div style="display:flex;gap:8px;">
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per kg (Rp)</label><input id="fb_buy" type="number" min="0" value="${isBulk?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+        <div><label style="font-size:12px;color:var(--text-dim);">Jenis curah</label>
+          <select id="fb_kind" style="width:100%;margin-top:4px;" ${p?'disabled':''}>
+            <option value="berat" ${bulkKind==='berat'?'selected':''}>Berdasarkan berat (kg / ons / gram)</option>
+            <option value="pcs" ${bulkKind==='pcs'?'selected':''}>Berdasarkan pcs / satuan (mis. papir, box)</option>
+          </select>
         </div>
-        <div style="display:flex;gap:8px;">
-          ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal (kg)</label><input id="fb_stock" type="number" min="0" step="any" value="0" style="width:100%;margin-top:4px;"></div>`:''}
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok (kg)</label><input id="fb_min" type="number" min="0" step="any" value="${isBulk?(p.min_stock||0)/1000:0}" style="width:100%;margin-top:4px;"></div>
+
+        <!-- CURAH BERDASARKAN BERAT -->
+        <div id="sec_bulk_berat" style="display:${bulkKind==='pcs'?'none':'flex'};flex-direction:column;gap:10px;">
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per kg (Rp)</label><input id="fb_buy" type="number" min="0" value="${isBulk&&bulkKind==='berat'?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          ${!p?`<div>
+            <label style="font-size:12px;color:var(--text-dim);">Stok Awal</label>
+            <div style="display:flex;gap:6px;margin-top:4px;">
+              <input id="fb_stock" type="number" min="0" step="any" value="0" style="flex:1;min-width:0;">
+              <select id="fb_stock_unit" style="width:90px;"><option value="1000">kg</option><option value="1">gram</option></select>
+            </div>
+          </div>`:''}
+          <div>
+            <label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label>
+            <div style="display:flex;gap:6px;margin-top:4px;">
+              <input id="fb_min" type="number" min="0" step="any" value="${isBulk&&bulkKind==='berat'?(p.min_stock||0):0}" style="flex:1;min-width:0;">
+              <select id="fb_min_unit" style="width:90px;">
+                <option value="1000" ${!(isBulk&&bulkKind==='berat')?'selected':''}>kg</option>
+                <option value="1" ${isBulk&&bulkKind==='berat'?'selected':''}>gram</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--text-dim);">Takaran jual (label · berat dalam gram · harga jual)</label>
+            <div style="font-size:11px;color:var(--text-faint);margin:2px 0 6px;">1 kg = 1000 g · 1 ons = 100 g · ½ ons = 50 g</div>
+            <div id="optList">${(bulkKind==='berat'?opts:DEFAULT_OPTS).map(optRowHtml).join('')}</div>
+            <button type="button" class="btn btn-ghost" id="optAdd" style="padding:6px 10px;font-size:12.5px;">+ Tambah takaran</button>
+          </div>
         </div>
-        <div>
-          <label style="font-size:12px;color:var(--text-dim);">Takaran jual (label · berat dalam gram · harga jual)</label>
-          <div style="font-size:11px;color:var(--text-faint);margin:2px 0 6px;">1 kg = 1000 g · 1 ons = 100 g · ½ ons = 50 g</div>
-          <div id="optList">${opts.map(optRowHtml).join('')}</div>
-          <button type="button" class="btn btn-ghost" id="optAdd" style="padding:6px 10px;font-size:12.5px;">+ Tambah takaran</button>
+
+        <!-- CURAH BERDASARKAN PCS -->
+        <div id="sec_bulk_pcs" style="display:${bulkKind==='pcs'?'flex':'none'};flex-direction:column;gap:10px;">
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per pcs (Rp)</label><input id="fp_buy" type="number" min="0" value="${isBulk&&bulkKind==='pcs'?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="display:flex;gap:8px;">
+            ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal (pcs)</label><input id="fp_stock" type="number" min="0" step="1" value="0" style="width:100%;margin-top:4px;"></div>`:''}
+            <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok (pcs)</label><input id="fp_min" type="number" min="0" step="1" value="${isBulk&&bulkKind==='pcs'?(p.min_stock||0):0}" style="width:100%;margin-top:4px;"></div>
+          </div>
+          <div>
+            <label style="font-size:12px;color:var(--text-dim);">Varian harga (nama · harga jual) — tiap kali laku, stok berkurang 1 pcs dari stok yang sama</label>
+            <div style="font-size:11px;color:var(--text-faint);margin:2px 0 6px;">Contoh: Papir Surya biasa = Rp 3.000, Papir Surya isi lebih = Rp 5.000 — satu box/stok yang sama, cuma beda harga jual.</div>
+            <div id="optListPcs">${(bulkKind==='pcs'?opts:DEFAULT_OPTS_PCS).map(optRowHtmlPcs).join('')}</div>
+            <button type="button" class="btn btn-ghost" id="optAddPcs" style="padding:6px 10px;font-size:12.5px;">+ Tambah varian harga</button>
+          </div>
         </div>
       </div>
 
@@ -796,12 +842,22 @@ function openProductModal(id){
     bg.querySelector('#sec_normal').style.display = bulkChk.checked ? 'none' : 'flex';
     bg.querySelector('#sec_bulk').style.display = bulkChk.checked ? 'flex' : 'none';
   };
+  const kindSel = bg.querySelector('#fb_kind');
+  kindSel.onchange = ()=>{
+    const k = kindSel.value;
+    bg.querySelector('#sec_bulk_berat').style.display = k==='pcs' ? 'none' : 'flex';
+    bg.querySelector('#sec_bulk_pcs').style.display = k==='pcs' ? 'flex' : 'none';
+  };
   const optList = bg.querySelector('#optList');
   optList.onclick = (e)=>{ const b = e.target.closest('.o_del'); if(b) b.closest('.optRow').remove(); };
   bg.querySelector('#optAdd').onclick = ()=> optList.insertAdjacentHTML('beforeend', optRowHtml({}));
+  const optListPcs = bg.querySelector('#optListPcs');
+  optListPcs.onclick = (e)=>{ const b = e.target.closest('.op_del'); if(b) b.closest('.optRowPcs').remove(); };
+  bg.querySelector('#optAddPcs').onclick = ()=> optListPcs.insertAdjacentHTML('beforeend', optRowHtmlPcs({}));
 
   bg.querySelector('#f_save').onclick = async ()=>{
     const bulk = bulkChk.checked;
+    const kind = kindSel.value;
     const payload = {
       name: bg.querySelector('#f_name').value.trim(),
       brand_id: bg.querySelector('#f_brand').value||null,
@@ -810,7 +866,22 @@ function openProductModal(id){
     };
     if(!payload.name){ alert('Nama produk wajib diisi.'); return; }
 
-    if(bulk){
+    if(bulk && kind==='pcs'){
+      const options = [...bg.querySelectorAll('.optRowPcs')].map(r=>({
+        label: r.querySelector('.op_label').value.trim(),
+        gram: 1,
+        price: Number(r.querySelector('.op_price').value)||0,
+      })).filter(o=>o.label);
+      if(!options.length){ alert('Tambahkan minimal satu varian harga (nama + harga).'); return; }
+      if(options.some(o=>o.price<=0)){ alert('Isi harga jual untuk setiap varian.'); return; }
+      payload.unit_id = null;
+      payload.bulk_unit = 'pcs';
+      payload.buy_price = Number(bg.querySelector('#fp_buy').value)||0;  // per pcs
+      payload.sell_price = 0;
+      payload.min_stock = Math.round(Number(bg.querySelector('#fp_min').value)||0);
+      payload.sell_options = options;
+      if(!p) payload.stock = Math.round(Number(bg.querySelector('#fp_stock').value)||0);
+    } else if(bulk){
       const options = [...bg.querySelectorAll('.optRow')].map(r=>({
         label: r.querySelector('.o_label').value.trim(),
         gram: Math.round(Number(r.querySelector('.o_gram').value)||0),
@@ -819,11 +890,12 @@ function openProductModal(id){
       if(!options.length){ alert('Tambahkan minimal satu takaran jual (label + gram).'); return; }
       if(options.some(o=>o.price<=0)){ alert('Isi harga jual untuk setiap takaran.'); return; }
       payload.unit_id = null;
+      payload.bulk_unit = 'berat';
       payload.buy_price = Number(bg.querySelector('#fb_buy').value)||0;  // per kg
       payload.sell_price = 0;
-      payload.min_stock = Math.round((Number(bg.querySelector('#fb_min').value)||0)*1000);
+      payload.min_stock = Math.round((Number(bg.querySelector('#fb_min').value)||0)*Number(bg.querySelector('#fb_min_unit').value));
       payload.sell_options = options;
-      if(!p) payload.stock = Math.round((Number(bg.querySelector('#fb_stock').value)||0)*1000);
+      if(!p) payload.stock = Math.round((Number(bg.querySelector('#fb_stock').value)||0)*Number(bg.querySelector('#fb_stock_unit').value));
     } else {
       payload.unit_id = bg.querySelector('#f_unit').value||null;
       payload.buy_price = Number(bg.querySelector('#f_buy').value)||0;
@@ -836,7 +908,7 @@ function openProductModal(id){
     let res;
     if(p){ res = await sb.from('products').update(payload).eq('id', p.id); }
     else { payload.branch_id = STATE.activeBranchId; res = await sb.from('products').insert(payload); }
-    if(res.error){ alert('Gagal menyimpan: '+res.error.message+'\n\nPastikan kolom is_bulk & sell_options sudah ditambahkan di Supabase.'); return; }
+    if(res.error){ alert('Gagal menyimpan: '+res.error.message+'\n\nPastikan kolom is_bulk, bulk_unit & sell_options sudah ditambahkan di Supabase.'); return; }
     bg.remove(); await loadProducts(); renderProduk();
   };
 }
@@ -844,6 +916,7 @@ function openProductModal(id){
 function openStockModal(id){
   const p = STATE.products.find(x=>x.id===id);
   const bulk = !!p.is_bulk;
+  const weightBulk = bulk && !isPcsBulk(p);
   const bg = modalShell('Ubah Stok — '+p.name, `
     <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Stok saat ini: <b>${esc(fmtStock(p))}</b></p>
     <div style="display:flex;gap:8px;margin-bottom:10px;">
@@ -851,8 +924,8 @@ function openStockModal(id){
       <button class="tabbtn" data-type="out" style="flex:1;">Kurangi Stok</button>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:8px;">
-      <input id="s_qty" type="number" min="0" step="${bulk?'any':'1'}" placeholder="Jumlah" style="flex:1;min-width:0;">
-      ${bulk?`<select id="s_unit" style="width:90px;"><option value="1000">kg</option><option value="1">gram</option></select>`:''}
+      <input id="s_qty" type="number" min="0" step="${weightBulk?'any':'1'}" placeholder="Jumlah" style="flex:1;min-width:0;">
+      ${weightBulk?`<select id="s_unit" style="width:90px;"><option value="1000">kg</option><option value="1">gram</option></select>`:''}
     </div>
     <input id="s_note" placeholder="Catatan (opsional)" style="width:100%;margin-bottom:10px;">
     <button class="btn btn-primary" id="s_save" style="width:100%;">Simpan</button>
@@ -862,7 +935,7 @@ function openStockModal(id){
   bg.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{ type=b.dataset.type; bg.querySelectorAll('[data-type]').forEach(x=>x.classList.remove('active')); b.classList.add('active'); });
   bg.querySelector('#s_save').onclick = async ()=>{
     const raw = Number(bg.querySelector('#s_qty').value);
-    const qty = bulk ? Math.round(raw * Number(bg.querySelector('#s_unit').value)) : raw;
+    const qty = weightBulk ? Math.round(raw * Number(bg.querySelector('#s_unit').value)) : Math.round(raw);
     if(!qty || qty<=0){ alert('Jumlah tidak valid.'); return; }
     const change = type==='in'?qty:-qty;
     // baca stok terbaru supaya tidak menimpa penjualan yang baru masuk
@@ -872,7 +945,7 @@ function openStockModal(id){
     await sb.from('stock_history').insert({product_id:p.id, branch_id:p.branch_id, change_qty:change, type, note:bg.querySelector('#s_note').value});
     bg.remove(); await loadProducts(); renderProduk();
   };
-  const showQty = (q)=> bulk ? (q>0?'+':'-')+fmtG(Math.abs(q)) : (q>0?'+':'')+q;
+  const showQty = (q)=> weightBulk ? (q>0?'+':'-')+fmtG(Math.abs(q)) : (q>0?'+':'')+q;
   sb.from('stock_history').select('*').eq('product_id', id).order('created_at',{ascending:false}).limit(10).then(({data})=>{
     bg.querySelector('#s_history').innerHTML = (data||[]).map(h=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);">${fmtDateTime(h.created_at)} · <b style="color:${h.change_qty>0?'var(--accent)':'var(--danger)'}">${esc(showQty(Number(h.change_qty)))}</b> · ${esc(h.type)} ${h.note?'· '+esc(h.note):''}</div>`).join('') || 'Belum ada riwayat.';
   });
