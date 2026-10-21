@@ -125,10 +125,47 @@ function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({"&":"&amp;",
 /* ---------- Helper produk curah (stok disimpan dalam GRAM) ---------- */
 function fmtG(g){ g = Number(g)||0; const a = Math.abs(g); return a>=1000 ? (g/1000).toLocaleString('id-ID',{maximumFractionDigits:3})+' kg' : g.toLocaleString('id-ID')+' g'; }
 function isPcsBulk(p){ return p.is_bulk && p.bulk_unit==='pcs'; }
-function fmtStock(p){ if(!p.is_bulk) return (p.stock+' '+(p.units?.name||'')).trim(); return isPcsBulk(p) ? (Number(p.stock)||0).toLocaleString('id-ID')+' pcs' : fmtG(p.stock); }
-function fmtMin(p){ if(!p.is_bulk) return p.min_stock; return isPcsBulk(p) ? (Number(p.min_stock)||0) : fmtG(p.min_stock); }
+/* Untuk curah pcs: stok, harga beli & minimum stok disimpan PER VARIAN di sell_options (tidak digabung). */
+function fmtStock(p){
+  if(!p.is_bulk) return (p.stock+' '+(p.units?.name||'')).trim();
+  if(isPcsBulk(p)) return optsOf(p).map(o=>esc(o.label)+': '+((Number(o.stock)||0).toLocaleString('id-ID'))+' pcs').join(', ') || '-';
+  return fmtG(p.stock);
+}
+function fmtMin(p){
+  if(!p.is_bulk) return p.min_stock;
+  if(isPcsBulk(p)) return optsOf(p).map(o=>esc(o.label)+': '+(Number(o.min_stock)||0)).join(', ') || '-';
+  return fmtG(p.min_stock);
+}
 function optsOf(p){ return Array.isArray(p.sell_options) ? p.sell_options : []; }
-function optCost(p,o){ return isPcsBulk(p) ? Math.round(Number(p.buy_price||0)) : Math.round(Number(p.buy_price||0) * Number(o.gram||0) / 1000); } // modal per takaran
+function optCost(p,o){ return isPcsBulk(p) ? Math.round(Number(o.buy_price||0)) : Math.round(Number(p.buy_price||0) * Number(o.gram||0) / 1000); } // modal per takaran (pcs: per varian; berat: per kg produk)
+function parseVariantLabel(item){ const m = String(item?.product_name||'').match(/\(([^)]+)\)\s*$/); return m ? m[1] : null; }
+/* Terapkan perubahan stok (delta bisa +/-) dengan benar baik utk produk biasa, curah berat (stok di produk),
+   maupun curah pcs (stok per varian di sell_options). Selalu baca data terbaru dulu supaya tidak menimpa transaksi lain. */
+async function applyStockChange({product_id, branch_id, label, delta, type, note, requireAvail}){
+  const {data:fp, error} = await sb.from('products').select('name, stock, is_bulk, bulk_unit, sell_options').eq('id', product_id).single();
+  if(error) throw error;
+  if(isPcsBulk(fp)){
+    const arr = Array.isArray(fp.sell_options) ? fp.sell_options.map(o=>({...o})) : [];
+    const idx = label!=null ? arr.findIndex(o=>o.label===label) : -1;
+    if(idx===-1){
+      if(requireAvail) throw new Error('Varian "'+(label||'-')+'" pada "'+fp.name+'" tidak ditemukan (mungkin sudah diubah/dihapus). Sesuaikan stok manual lewat tombol ±Stok.');
+      await sb.from('stock_history').insert({product_id, branch_id, change_qty:0, type, note:'(varian "'+(label||'-')+'" tidak ditemukan, stok tidak disesuaikan otomatis) '+(note||'')});
+      return;
+    }
+    const cur = Number(arr[idx].stock)||0;
+    const next = cur + delta;
+    if(requireAvail && next < 0) throw new Error('Stok "'+fp.name+' ('+label+')" tidak cukup.');
+    arr[idx] = {...arr[idx], stock: Math.max(0,next)};
+    await sb.from('products').update({sell_options:arr}).eq('id', product_id);
+    await sb.from('stock_history').insert({product_id, branch_id, change_qty:delta, type, note:'['+label+'] '+(note||'')});
+  } else {
+    const cur = Number(fp.stock)||0;
+    const next = cur + delta;
+    if(requireAvail && next < 0) throw new Error('Stok "'+fp.name+'" tidak cukup.');
+    await sb.from('products').update({stock: Math.max(0,next)}).eq('id', product_id);
+    await sb.from('stock_history').insert({product_id, branch_id, change_qty:delta, type, note: note||''});
+  }
+}
 
 /* ---------------- THEME ---------------- */
 function applyTheme(){
@@ -365,11 +402,18 @@ function renderPOS(){
   renderCart();
 }
 
-/* Total stok (satuan dasar: gram utk curah, pcs utk biasa) yang sudah masuk keranjang */
-function cartUsed(productId, exceptKey){
-  return STATE.cart.filter(c=>c.product_id===productId && c.key!==exceptKey).reduce((s,c)=>s + c.qty*c.per, 0);
+/* Total stok (satuan dasar: gram utk curah berat, pcs utk biasa/curah pcs) yang sudah masuk keranjang.
+   optIdx diisi kalau mau hitung khusus satu varian curah pcs (karena stoknya terpisah per varian). */
+function cartUsed(productId, exceptKey, optIdx){
+  return STATE.cart.filter(c=>c.product_id===productId && c.key!==exceptKey && (optIdx===undefined || c.opt===optIdx)).reduce((s,c)=>s + c.qty*c.per, 0);
 }
-function stockLeft(p){ return (p.stock||0) - cartUsed(p.id); }
+function stockLeft(p, optIdx){
+  if(isPcsBulk(p) && optIdx!=null){
+    const o = optsOf(p)[optIdx];
+    return (Number(o?.stock)||0) - cartUsed(p.id, undefined, optIdx);
+  }
+  return (p.stock||0) - cartUsed(p.id);
+}
 
 /* Chip kategori: klik langsung untuk filter, klik lagi untuk batal */
 const CATEGORY_ORDER = ['tembakau','busa','kertas','cengkeh','lem','cetakan','selongsong','pipa'];
@@ -422,6 +466,26 @@ function renderPosBrands(){
 
 function posCardHtml(p){
   const status = p.stock<=0 ? '<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>' : (p.stock<=p.min_stock ? '<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'');
+  if(p.is_bulk && isPcsBulk(p)){
+    return `
+    <div class="posCard" style="break-inside:avoid;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;padding:11px;background:var(--surface);">
+      <div style="font-weight:700;font-size:13px;margin-bottom:7px;">${esc(p.name)}</div>
+      <div style="display:flex;flex-direction:column;gap:5px;">
+        ${optsOf(p).map((o,i)=>{
+          const left = stockLeft(p, i);
+          const disabled = left < 1;
+          const low = !disabled && left<=(Number(o.min_stock)||0);
+          return `<div class="posOptRow ${disabled?'disabled':''}" data-bulk="${p.id}" data-opt="${i}" style="display:flex;justify-content:space-between;align-items:center;padding:7px 9px;border-radius:7px;background:var(--surface-2);${disabled?'opacity:.4;cursor:not-allowed;':'cursor:pointer;'}">
+            <span>
+              <span style="font-size:12px;font-weight:600;display:block;">${esc(o.label)}</span>
+              <span style="font-size:10px;color:${disabled?'var(--danger)':(low?'var(--warn)':'var(--text-faint)')};">stok ${left}</span>
+            </span>
+            <span style="font-size:12px;color:var(--accent);font-weight:700;">${fmtIDR(o.price)}</span>
+          </div>`;
+        }).join('') || '<div style="font-size:11px;color:var(--text-faint);">Belum ada varian harga.</div>'}
+      </div>
+    </div>`;
+  }
   if(p.is_bulk){
     const left = stockLeft(p);
     return `
@@ -487,23 +551,33 @@ function renderPosProducts(){
 
 function addToCart(id, optIdx){
   const p = STATE.products.find(x=>x.id===id);
-  if(!p || p.stock<=0){ return; }
-  let per=1, price=p.sell_price, buy=p.buy_price, name=p.name, key=id;
+  if(!p) return;
+  let per=1, price=p.sell_price, buy=p.buy_price, name=p.name, key=id, opt=null;
   if(p.is_bulk){
     const o = optsOf(p)[optIdx]; if(!o) return;
-    per = Number(o.gram)||1; price = Number(o.price)||0;
-    buy = optCost(p,o); // harga modal per takaran (per kg utk curah berat, per pcs utk curah satuan)
+    opt = optIdx;
+    per = isPcsBulk(p) ? 1 : (Number(o.gram)||1);
+    price = Number(o.price)||0;
+    buy = optCost(p,o); // harga modal per takaran (per kg utk curah berat, per varian utk curah pcs)
     name = `${p.name} (${o.label})`; key = id+':'+optIdx;
+  } else {
+    if(p.stock<=0) return;
   }
-  if(stockLeft(p) < per) return;
+  if(stockLeft(p, opt) < per) return;
   const existing = STATE.cart.find(c=>c.key===key);
   if(existing) existing.qty++;
-  else STATE.cart.push({key, product_id:id, name, price, buy_price:buy, qty:1, discount:0, per});
+  else STATE.cart.push({key, product_id:id, name, price, buy_price:buy, qty:1, discount:0, per, opt});
   renderCart();
 }
 
 function maxQtyFor(c){
   const p = STATE.products.find(x=>x.id===c.product_id);
+  if(!p) return 1;
+  if(isPcsBulk(p) && c.opt!=null){
+    const o = optsOf(p)[c.opt];
+    const others = cartUsed(c.product_id, c.key, c.opt);
+    return Math.max(1, Math.floor(((Number(o?.stock)||0) - others) / c.per));
+  }
   const others = cartUsed(c.product_id, c.key);
   return Math.max(1, Math.floor(((p?.stock||0) - others) / c.per));
 }
@@ -559,16 +633,19 @@ async function saveSale(){
   const change = STATE.payMethod==='Tunai' ? cash-total : 0;
   const btn = document.getElementById('btnSaveSale'); btn.disabled=true; btn.textContent='Menyimpan...';
   try{
-    // Total pengurangan stok per produk (gram untuk curah, pcs untuk biasa)
-    const need = {};
-    STATE.cart.forEach(c=>{ need[c.product_id] = (need[c.product_id]||0) + c.qty*c.per; });
-    // Cek stok terbaru dari database sebelum menyimpan
-    const fresh = {};
-    for(const pid of Object.keys(need)){
-      const {data:fp, error:fe} = await sb.from('products').select('name, stock, is_bulk, bulk_unit').eq('id', pid).single();
+    // Cek stok terbaru dari database sebelum menyimpan (per baris keranjang, karena curah pcs stoknya per varian)
+    for(const c of STATE.cart){
+      const p = STATE.products.find(x=>x.id===c.product_id);
+      const {data:fp, error:fe} = await sb.from('products').select('name, stock, is_bulk, bulk_unit, sell_options').eq('id', c.product_id).single();
       if(fe) throw fe;
-      if(Number(fp.stock) < need[pid]) throw new Error('Stok "'+fp.name+'" tidak cukup (sisa '+fmtStock(fp)+').');
-      fresh[pid] = fp;
+      if(p && isPcsBulk(p)){
+        const label = (optsOf(p)[c.opt]||{}).label;
+        const curOpt = optsOf(fp).find(o=>o.label===label);
+        const curStock = Number(curOpt?.stock)||0;
+        if(curStock < c.qty*c.per) throw new Error('Stok "'+fp.name+' ('+label+')" tidak cukup (sisa '+curStock+' pcs).');
+      } else {
+        if(Number(fp.stock) < c.qty*c.per) throw new Error('Stok "'+fp.name+'" tidak cukup (sisa '+fmtStock(fp)+').');
+      }
     }
     const {data: sale, error} = await sb.from('sales').insert({
       branch_id: STATE.activeBranchId, staff_id: STATE.session.staff.id, staff_name: STATE.session.staff.name,
@@ -579,9 +656,10 @@ async function saveSale(){
     const itemRows = STATE.cart.map(c=>({sale_id: sale.id, product_id:c.product_id, product_name:c.name, qty:c.qty, price:c.price, discount:c.discount, buy_price:c.buy_price}));
     const {error:itemErr} = await sb.from('sale_items').insert(itemRows);
     if(itemErr){ await sb.from('sales').delete().eq('id', sale.id); throw new Error('Gagal menyimpan rincian item: '+itemErr.message); }
-    for(const pid of Object.keys(need)){
-      await sb.from('products').update({stock: Number(fresh[pid].stock) - need[pid]}).eq('id', pid);
-      await sb.from('stock_history').insert({product_id:pid, branch_id:STATE.activeBranchId, change_qty:-need[pid], type:'sale', note:'Penjualan #'+sale.id.slice(0,8)});
+    for(const c of STATE.cart){
+      const p = STATE.products.find(x=>x.id===c.product_id);
+      const label = (p && isPcsBulk(p)) ? (optsOf(p)[c.opt]||{}).label : null;
+      await applyStockChange({product_id:c.product_id, branch_id:STATE.activeBranchId, label, delta:-(c.qty*c.per), type:'sale', note:'Penjualan #'+sale.id.slice(0,8), requireAvail:false});
     }
     STATE.cart=[]; STATE.txDiscount=0; STATE.note='';
     await loadProducts();
@@ -610,17 +688,27 @@ function renderProduk(){
   <div id="lowStockSection"></div>`;
 
   function rowHtml(p){
+    const pcs = isPcsBulk(p);
+    const opts = p.is_bulk ? optsOf(p) : [];
+    let status;
+    if(pcs){
+      const anyHabis = opts.some(o=>(Number(o.stock)||0)<=0);
+      const anyMenipis = opts.some(o=>(Number(o.stock)||0)<=(Number(o.min_stock)||0));
+      status = anyHabis?'<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>':anyMenipis?'<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Aman</span>';
+    } else {
+      status = p.stock<=0?'<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>':p.stock<=p.min_stock?'<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Aman</span>';
+    }
     return `<tr>
         <td style="font-weight:600;">${esc(p.name)}</td>
         <td>${esc(p.brands?.name||'-')}</td>
         <td>${esc(p.categories?.name||'-')}</td>
-        <td>${p.is_bulk?(isPcsBulk(p)?'Curah (pcs)':'Curah (berat)'):esc(p.units?.name||'-')}</td>
-        <td>${fmtIDR(p.buy_price)}${p.is_bulk?(isPcsBulk(p)?' /pcs':' /kg'):''}</td>
-        <td style="${p.is_bulk?'white-space:normal;font-size:12px;min-width:150px;':''}">${p.is_bulk ? (optsOf(p).map(o=>esc(o.label)+': '+fmtIDR(o.price)).join('<br>')||'-') : fmtIDR(p.sell_price)}</td>
-        <td style="color:var(--accent);font-weight:600;${p.is_bulk?'white-space:normal;font-size:12px;min-width:90px;':''}">${p.is_bulk ? (optsOf(p).map(o=>fmtIDR(Number(o.price)-optCost(p,o))).join('<br>')||'-') : fmtIDR(p.sell_price-p.buy_price)}</td>
-        <td>${esc(fmtStock(p))}</td>
-        <td>${esc(fmtMin(p))}</td>
-        <td>${p.stock<=0?'<span class="pill" style="background:var(--danger-dim);color:var(--danger);">Habis</span>':p.stock<=p.min_stock?'<span class="pill" style="background:var(--warn-dim);color:var(--warn);">Menipis</span>':'<span class="pill" style="background:var(--accent-dim);color:var(--accent);">Aman</span>'}</td>
+        <td>${p.is_bulk?(pcs?'Curah (pcs)':'Curah (berat)'):esc(p.units?.name||'-')}</td>
+        <td style="${pcs?'white-space:normal;font-size:12px;min-width:120px;':''}">${pcs ? (opts.map(o=>esc(o.label)+': '+fmtIDR(o.buy_price)).join('<br>')||'-') : fmtIDR(p.buy_price)+(p.is_bulk?' /kg':'')}</td>
+        <td style="${p.is_bulk?'white-space:normal;font-size:12px;min-width:150px;':''}">${p.is_bulk ? (opts.map(o=>esc(o.label)+': '+fmtIDR(o.price)).join('<br>')||'-') : fmtIDR(p.sell_price)}</td>
+        <td style="color:var(--accent);font-weight:600;${p.is_bulk?'white-space:normal;font-size:12px;min-width:90px;':''}">${p.is_bulk ? (opts.map(o=>fmtIDR(Number(o.price)-optCost(p,o))).join('<br>')||'-') : fmtIDR(p.sell_price-p.buy_price)}</td>
+        <td style="${pcs?'white-space:normal;font-size:12px;min-width:110px;':''}">${pcs ? (opts.map(o=>esc(o.label)+': '+((Number(o.stock)||0))+' pcs').join('<br>')||'-') : esc(fmtStock(p))}</td>
+        <td style="${pcs?'white-space:normal;font-size:12px;min-width:80px;':''}">${pcs ? (opts.map(o=>esc(o.label)+': '+(Number(o.min_stock)||0)).join('<br>')||'-') : esc(fmtMin(p))}</td>
+        <td>${status}</td>
         <td>
           <div style="display:flex;gap:4px;">
             <button class="btn btn-ghost" data-stock="${p.id}" style="padding:5px 8px;">±Stok</button>
@@ -661,14 +749,25 @@ function renderProduk(){
   }
 
   function drawLowStock(){
-    let list = STATE.products.filter(p=>p.stock<=p.min_stock);
-    if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
-    if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
+    let prods = STATE.products;
+    if(STATE.prodCat) prods = prods.filter(p=>p.category_id===STATE.prodCat);
+    if(STATE.prodBrand) prods = prods.filter(p=>p.brand_id===STATE.prodBrand);
+    const rows = [];
+    prods.forEach(p=>{
+      if(isPcsBulk(p)){
+        optsOf(p).forEach(o=>{
+          const stock = Number(o.stock)||0, min = Number(o.min_stock)||0;
+          if(stock<=min) rows.push({name:p.name+' ('+o.label+')', brand:p.brands?.name, branch:p.branch_id, stock:stock+' pcs', min});
+        });
+      } else if(p.stock<=p.min_stock){
+        rows.push({name:p.name, brand:p.brands?.name, branch:p.branch_id, stock:fmtStock(p), min:fmtMin(p)});
+      }
+    });
     const sec = document.getElementById('lowStockSection');
-    if(!list.length){ sec.innerHTML=''; return; }
-    sec.innerHTML = `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${list.length})</h3>
+    if(!rows.length){ sec.innerHTML=''; return; }
+    sec.innerHTML = `<h3 style="font-size:14px;font-weight:800;margin-bottom:8px;color:var(--danger);">⚠ Stok Menipis (${rows.length})</h3>
     <div class="card scrollx"><table><thead><tr><th>Produk</th><th>Merek</th><th>Cabang</th><th>Stok</th><th>Min Stok</th></tr></thead><tbody>
-    ${list.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc(p.brands?.name||'-')}</td><td>${esc(branchName(p.branch_id))}</td><td style="color:var(--danger);font-weight:700;">${esc(fmtStock(p))}</td><td>${esc(fmtMin(p))}</td></tr>`).join('')}
+    ${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${esc(r.brand||'-')}</td><td>${esc(branchName(r.branch))}</td><td style="color:var(--danger);font-weight:700;">${esc(String(r.stock))}</td><td>${esc(String(r.min))}</td></tr>`).join('')}
     </tbody></table></div>`;
   }
 
@@ -732,7 +831,7 @@ const DEFAULT_OPTS = [
   {label:'1 ons', gram:100, price:0},
   {label:'½ ons', gram:50, price:0},
 ];
-const DEFAULT_OPTS_PCS = [{label:'', price:0}, {label:'', price:0}];
+const DEFAULT_OPTS_PCS = [{label:'', buy_price:0, price:0, stock:0, min_stock:0}, {label:'', buy_price:0, price:0, stock:0, min_stock:0}];
 
 function optRowHtml(o){
   return `<div class="optRow" style="display:flex;gap:6px;margin-bottom:6px;">
@@ -742,10 +841,18 @@ function optRowHtml(o){
     <button type="button" class="btn btn-danger o_del" style="padding:5px 9px;">✕</button>
   </div>`;
 }
-function optRowHtmlPcs(o){
-  return `<div class="optRowPcs" style="display:flex;gap:6px;margin-bottom:6px;">
-    <input class="op_label" placeholder="Nama varian (mis. Surya biasa)" value="${esc(o.label||'')}" style="flex:1.4;min-width:0;">
-    <input class="op_price" type="number" min="0" placeholder="Harga jual" value="${o.price||''}" style="flex:1;min-width:0;">
+/* locked=true utk varian yang sudah ada saat edit produk -> stoknya tidak bisa diketik ulang di sini,
+   harus lewat ±Stok supaya tidak timpa penjualan & tetap tercatat di riwayat stok. */
+function optRowHtmlPcs(o, locked){
+  return `<div class="optRowPcs" ${locked?`data-locked="1" data-stock="${Number(o.stock)||0}"`:''} style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+    <input class="op_label" placeholder="Nama varian (mis. Surya biasa)" value="${esc(o.label||'')}" style="flex:1.6;min-width:130px;">
+    <input class="op_buy" type="number" min="0" placeholder="Harga beli" value="${o.buy_price||''}" style="flex:1;min-width:85px;">
+    <input class="op_price" type="number" min="0" placeholder="Harga jual" value="${o.price||''}" style="flex:1;min-width:85px;">
+    ${locked
+      ? `<div style="flex:1;min-width:120px;font-size:11.5px;color:var(--text-faint);align-self:center;">Stok: <b style="color:var(--text);">${(Number(o.stock)||0).toLocaleString('id-ID')} pcs</b><br>(atur lewat ±Stok)</div>`
+      : `<input class="op_stock" type="number" min="0" step="1" placeholder="Stok awal" value="${o.stock||''}" style="flex:1;min-width:85px;">`
+    }
+    <input class="op_min" type="number" min="0" step="1" placeholder="Min stok" value="${o.min_stock||''}" style="flex:1;min-width:85px;">
     <button type="button" class="btn btn-danger op_del" style="padding:5px 9px;">✕</button>
   </div>`;
 }
@@ -820,15 +927,10 @@ function openProductModal(id){
 
         <!-- CURAH BERDASARKAN PCS -->
         <div id="sec_bulk_pcs" style="display:${bulkKind==='pcs'?'flex':'none'};flex-direction:column;gap:10px;">
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per pcs (Rp)</label><input id="fp_buy" type="number" min="0" value="${isBulk&&bulkKind==='pcs'?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
-          <div style="display:flex;gap:8px;">
-            ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal (pcs)</label><input id="fp_stock" type="number" min="0" step="1" value="0" style="width:100%;margin-top:4px;"></div>`:''}
-            <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok (pcs)</label><input id="fp_min" type="number" min="0" step="1" value="${isBulk&&bulkKind==='pcs'?(p.min_stock||0):0}" style="width:100%;margin-top:4px;"></div>
-          </div>
           <div>
-            <label style="font-size:12px;color:var(--text-dim);">Varian harga (nama · harga jual) — tiap kali laku, stok berkurang 1 pcs dari stok yang sama</label>
-            <div style="font-size:11px;color:var(--text-faint);margin:2px 0 6px;">Contoh: Papir Surya biasa = Rp 3.000, Papir Surya isi lebih = Rp 5.000 — satu box/stok yang sama, cuma beda harga jual.</div>
-            <div id="optListPcs">${(bulkKind==='pcs'?opts:DEFAULT_OPTS_PCS).map(optRowHtmlPcs).join('')}</div>
+            <label style="font-size:12px;color:var(--text-dim);">Varian harga — tiap varian punya harga beli, harga jual &amp; stok sendiri-sendiri (tidak digabung)</label>
+            <div style="font-size:11px;color:var(--text-faint);margin:2px 0 8px;">Contoh: Papir Surya biasa — modal Rp 2.000, jual Rp 3.000. Papir Surya isi lebih — modal Rp 4.000, jual Rp 5.000. Stok keduanya dihitung terpisah.</div>
+            <div id="optListPcs">${(bulkKind==='pcs'?opts:DEFAULT_OPTS_PCS).map(o=>optRowHtmlPcs(o, bulkKind==='pcs' && !!p)).join('')}</div>
             <button type="button" class="btn btn-ghost" id="optAddPcs" style="padding:6px 10px;font-size:12.5px;">+ Tambah varian harga</button>
           </div>
         </div>
@@ -853,7 +955,7 @@ function openProductModal(id){
   bg.querySelector('#optAdd').onclick = ()=> optList.insertAdjacentHTML('beforeend', optRowHtml({}));
   const optListPcs = bg.querySelector('#optListPcs');
   optListPcs.onclick = (e)=>{ const b = e.target.closest('.op_del'); if(b) b.closest('.optRowPcs').remove(); };
-  bg.querySelector('#optAddPcs').onclick = ()=> optListPcs.insertAdjacentHTML('beforeend', optRowHtmlPcs({}));
+  bg.querySelector('#optAddPcs').onclick = ()=> optListPcs.insertAdjacentHTML('beforeend', optRowHtmlPcs({}, false));
 
   bg.querySelector('#f_save').onclick = async ()=>{
     const bulk = bulkChk.checked;
@@ -867,20 +969,27 @@ function openProductModal(id){
     if(!payload.name){ alert('Nama produk wajib diisi.'); return; }
 
     if(bulk && kind==='pcs'){
-      const options = [...bg.querySelectorAll('.optRowPcs')].map(r=>({
-        label: r.querySelector('.op_label').value.trim(),
-        gram: 1,
-        price: Number(r.querySelector('.op_price').value)||0,
-      })).filter(o=>o.label);
-      if(!options.length){ alert('Tambahkan minimal satu varian harga (nama + harga).'); return; }
+      const options = [...bg.querySelectorAll('.optRowPcs')].map(r=>{
+        const locked = r.dataset.locked==='1';
+        const stock = locked ? (Number(r.dataset.stock)||0) : Math.round(Number(r.querySelector('.op_stock')?.value)||0);
+        return {
+          label: r.querySelector('.op_label').value.trim(),
+          gram: 1,
+          buy_price: Number(r.querySelector('.op_buy').value)||0,
+          price: Number(r.querySelector('.op_price').value)||0,
+          stock,
+          min_stock: Math.round(Number(r.querySelector('.op_min').value)||0),
+        };
+      }).filter(o=>o.label);
+      if(!options.length){ alert('Tambahkan minimal satu varian harga (nama, harga beli & harga jual).'); return; }
       if(options.some(o=>o.price<=0)){ alert('Isi harga jual untuk setiap varian.'); return; }
       payload.unit_id = null;
       payload.bulk_unit = 'pcs';
-      payload.buy_price = Number(bg.querySelector('#fp_buy').value)||0;  // per pcs
+      payload.buy_price = 0;   // sudah per varian di sell_options
       payload.sell_price = 0;
-      payload.min_stock = Math.round(Number(bg.querySelector('#fp_min').value)||0);
+      payload.min_stock = 0;   // sudah per varian di sell_options
       payload.sell_options = options;
-      if(!p) payload.stock = Math.round(Number(bg.querySelector('#fp_stock').value)||0);
+      if(!p) payload.stock = 0; // sudah per varian di sell_options
     } else if(bulk){
       const options = [...bg.querySelectorAll('.optRow')].map(r=>({
         label: r.querySelector('.o_label').value.trim(),
@@ -916,9 +1025,15 @@ function openProductModal(id){
 function openStockModal(id){
   const p = STATE.products.find(x=>x.id===id);
   const bulk = !!p.is_bulk;
-  const weightBulk = bulk && !isPcsBulk(p);
+  const pcsBulk = isPcsBulk(p);
+  const weightBulk = bulk && !pcsBulk;
+  const opts = pcsBulk ? optsOf(p) : [];
   const bg = modalShell('Ubah Stok — '+p.name, `
     <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Stok saat ini: <b>${esc(fmtStock(p))}</b></p>
+    ${pcsBulk?`<div style="margin-bottom:10px;">
+      <label style="font-size:12px;color:var(--text-dim);">Varian</label>
+      <select id="s_variant" style="width:100%;margin-top:4px;">${opts.map((o,i)=>`<option value="${i}">${esc(o.label)} (stok saat ini: ${Number(o.stock)||0})</option>`).join('')}</select>
+    </div>`:''}
     <div style="display:flex;gap:8px;margin-bottom:10px;">
       <button class="tabbtn active" data-type="in" style="flex:1;">Tambah Stok</button>
       <button class="tabbtn" data-type="out" style="flex:1;">Kurangi Stok</button>
@@ -938,12 +1053,12 @@ function openStockModal(id){
     const qty = weightBulk ? Math.round(raw * Number(bg.querySelector('#s_unit').value)) : Math.round(raw);
     if(!qty || qty<=0){ alert('Jumlah tidak valid.'); return; }
     const change = type==='in'?qty:-qty;
-    // baca stok terbaru supaya tidak menimpa penjualan yang baru masuk
-    const {data:cur} = await sb.from('products').select('stock').eq('id', p.id).single();
-    const newStock = Math.max(0, Number(cur?.stock ?? p.stock)+change);
-    await sb.from('products').update({stock:newStock}).eq('id', p.id);
-    await sb.from('stock_history').insert({product_id:p.id, branch_id:p.branch_id, change_qty:change, type, note:bg.querySelector('#s_note').value});
-    bg.remove(); await loadProducts(); renderProduk();
+    const label = pcsBulk ? opts[Number(bg.querySelector('#s_variant').value)]?.label : null;
+    const btn = bg.querySelector('#s_save'); btn.disabled=true; btn.textContent='Menyimpan...';
+    try{
+      await applyStockChange({product_id:p.id, branch_id:p.branch_id, label, delta:change, type, note:bg.querySelector('#s_note').value, requireAvail:true});
+      bg.remove(); await loadProducts(); renderProduk();
+    }catch(err){ alert('Gagal menyimpan: '+err.message); btn.disabled=false; btn.textContent='Simpan'; }
   };
   const showQty = (q)=> weightBulk ? (q>0?'+':'-')+fmtG(Math.abs(q)) : (q>0?'+':'')+q;
   sb.from('stock_history').select('*').eq('product_id', id).order('created_at',{ascending:false}).limit(10).then(({data})=>{
@@ -1200,10 +1315,8 @@ async function deleteSale(sale, its){
     if(p){
       const per = gramFromSaleItem(x, p);
       if(per){
-        const {data:cur} = await sb.from('products').select('stock').eq('id', p.id).single();
-        const newStock = Number(cur?.stock ?? p.stock) + Number(x.qty)*per;
-        await sb.from('products').update({stock:newStock}).eq('id', p.id);
-        await sb.from('stock_history').insert({product_id:p.id, branch_id:sale.branch_id, change_qty:Number(x.qty)*per, type:'void_sale', note:'Hapus transaksi #'+sale.id.slice(0,8)});
+        const label = isPcsBulk(p) ? parseVariantLabel(x) : null;
+        await applyStockChange({product_id:p.id, branch_id:sale.branch_id, label, delta:Number(x.qty)*per, type:'void_sale', note:'Hapus transaksi #'+sale.id.slice(0,8), requireAvail:false});
       }
     }
   }
@@ -1289,15 +1402,22 @@ function openSaleEditor(sale, its, onChanged){
     const cash = Number(bg.querySelector('#se_cash')?.value)||0;
     if(payMethod==='Tunai' && cash < total){ err.textContent='Uang diterima kurang dari total.'; err.style.display='block'; return; }
 
-    // hitung perubahan stok per produk (gram/pcs)
-    const delta = {}; // product_id -> perubahan stok (+ berarti dikembalikan ke stok)
+    // hitung perubahan stok per produk + varian (gram/pcs) — curah pcs stoknya terpisah per varian
+    const delta = {}; // key `${product_id}|${label||''}` -> {product_id,label,qty} (+ berarti dikembalikan ke stok)
+    function addDelta(product_id, label, qty){
+      if(!qty) return;
+      const key = product_id+'|'+(label||'');
+      if(!delta[key]) delta[key] = {product_id, label, qty:0};
+      delta[key].qty += qty;
+    }
     const keptIdx = new Set(rows.map(r=>r.idx));
     its.forEach((x,i)=>{
       const p = STATE.products.find(y=>y.id===x.product_id);
       const per = gramFromSaleItem(x, p);
       if(!per) return; // tidak diketahui -> tidak diotak-atik stoknya
       if(!keptIdx.has(i)){
-        delta[x.product_id] = (delta[x.product_id]||0) + Number(x.qty)*per; // dihapus -> kembalikan semua
+        const label = (p && isPcsBulk(p)) ? parseVariantLabel(x) : null;
+        addDelta(x.product_id, label, Number(x.qty)*per); // dihapus -> kembalikan semua
       }
     });
     rows.forEach(r=>{
@@ -1305,20 +1425,17 @@ function openSaleEditor(sale, its, onChanged){
       const p = STATE.products.find(y=>y.id===x.product_id);
       const per = gramFromSaleItem(x, p);
       if(!per) return;
+      const label = (p && isPcsBulk(p)) ? parseVariantLabel(x) : null;
       const diffQty = Number(x.qty) - r.qty; // qty lama - qty baru -> + berarti dikembalikan
-      delta[x.product_id] = (delta[x.product_id]||0) + diffQty*per;
+      addDelta(x.product_id, label, diffQty*per);
     });
 
     const btn = bg.querySelector('#se_save'); btn.disabled=true; btn.textContent='Menyimpan...';
     try{
       // validasi & terapkan perubahan stok
-      for(const pid of Object.keys(delta)){
-        const {data:cur, error:ce} = await sb.from('products').select('stock,name').eq('id', pid).single();
-        if(ce) throw ce;
-        const newStock = Number(cur.stock) + delta[pid];
-        if(newStock < 0) throw new Error('Stok "'+cur.name+'" tidak cukup untuk perubahan ini.');
-        await sb.from('products').update({stock:newStock}).eq('id', pid);
-        if(delta[pid]!==0) await sb.from('stock_history').insert({product_id:pid, branch_id:sale.branch_id, change_qty:delta[pid], type:'edit_sale', note:'Edit transaksi #'+sale.id.slice(0,8)});
+      for(const key of Object.keys(delta)){
+        const {product_id, label, qty} = delta[key];
+        await applyStockChange({product_id, branch_id:sale.branch_id, label, delta:qty, type:'edit_sale', note:'Edit transaksi #'+sale.id.slice(0,8), requireAvail:true});
       }
       // hapus item yang dibuang
       for(let i=0;i<its.length;i++){
