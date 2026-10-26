@@ -167,6 +167,200 @@ async function applyStockChange({product_id, branch_id, label, delta, type, note
   }
 }
 
+/* ---------------- VOICE INPUT (mikrofon) ---------------- */
+function getSpeechRecognizer(lang){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR) return null;
+  const r = new SR();
+  r.lang = lang || 'id-ID';
+  r.maxAlternatives = 1;
+  return r;
+}
+/* Ubah kata bilangan bahasa Indonesia yg umum dipakai utk harga/jumlah jadi angka.
+   "lima ribu"->5000, "dua puluh lima ribu"->25000, "seratus"->100, "satu"->1, dst. */
+function parseIdNumberRun(words, start){
+  const ones = {satu:1,dua:2,tiga:3,empat:4,lima:5,enam:6,tujuh:7,delapan:8,sembilan:9};
+  let i = start, cur = 0, total = 0;
+  while(i < words.length){
+    const t = words[i], nxt = words[i+1];
+    if(t==='nol'||t==='kosong'){ i++; continue; }
+    if(t==='seratus'){ cur+=100; i++; continue; }
+    if(t==='seribu'){ total += (cur||1)*1000; cur=0; i++; continue; }
+    if(t==='sepuluh'){ cur+=10; i++; continue; }
+    if(t==='sebelas'){ cur+=11; i++; continue; }
+    if(ones[t]!=null){
+      if(nxt==='belas'){ cur+=ones[t]+10; i+=2; continue; }
+      if(nxt==='puluh'){ cur+=ones[t]*10; i+=2; continue; }
+      if(nxt==='ratus'){ cur+=ones[t]*100; i+=2; continue; }
+      if(nxt==='ribu'){ total+=(cur+ones[t])*1000; cur=0; i+=2; continue; }
+      if(nxt==='juta'){ total+=(cur+ones[t])*1000000; cur=0; i+=2; continue; }
+      cur+=ones[t]; i++; continue;
+    }
+    if(t==='ribu'){ total+=(cur||1)*1000; cur=0; i++; continue; }
+    if(t==='ratus'){ cur=(cur||1)*100; i++; continue; }
+    if(t==='puluh'){ cur=(cur||1)*10; i++; continue; }
+    if(t==='juta'){ total+=(cur||1)*1000000; cur=0; i++; continue; }
+    if(/^\d+$/.test(t)){ cur+=Number(t); i++; continue; }
+    break;
+  }
+  return {value: total+cur, used: i-start};
+}
+const ID_NUMWORDS = new Set(['nol','kosong','satu','dua','tiga','empat','lima','enam','tujuh','delapan','sembilan','sepuluh','sebelas','seratus','seribu','belas','puluh','ratus','ribu','juta']);
+function normalizeSpokenNumbers(text){
+  const words = text.toLowerCase().replace(/[.,;]/g,' ').split(/\s+/).filter(Boolean);
+  const out = []; let i=0;
+  while(i<words.length){
+    const w = words[i];
+    if(/^\d+$/.test(w) || ID_NUMWORDS.has(w)){
+      const {value, used} = parseIdNumberRun(words, i);
+      if(used>0){ out.push(String(value)); i+=used; continue; }
+    }
+    out.push(w); i++;
+  }
+  return out.join(' ');
+}
+function voiceTokenize(s){ return String(s||'').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(w=>w.length>1); }
+/* Bangun daftar "kata kunci" dari semua produk aktif (termasuk tiap varian curah) utk dicocokkan dgn ucapan. */
+function buildVoiceIndex(){
+  const idx = [];
+  STATE.products.forEach(p=>{
+    if(!p.is_bulk){
+      idx.push({pid:p.id, opt:null, label:p.name, price:Number(p.sell_price)||0, tokens:voiceTokenize(p.name), stockOk:(p.stock>0)});
+    } else if(isPcsBulk(p)){
+      optsOf(p).forEach((o,i)=>{
+        const m = String(o.label||'').match(/\d+/);
+        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, variantNum: m?Number(m[0]):(Number(o.price)||null), tokens:voiceTokenize(p.name+' '+o.label), stockOk:((Number(o.stock)||0)>0)});
+      });
+    } else {
+      optsOf(p).forEach((o,i)=>{
+        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, tokens:voiceTokenize(p.name+' '+o.label), stockOk:true});
+      });
+    }
+  });
+  return idx;
+}
+function matchVoiceSegment(seg, idx){
+  const tokens = seg.split(/\s+/).filter(Boolean);
+  const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
+  const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
+  let best=null, bestScore=0;
+  idx.forEach(e=>{
+    let hit=0;
+    e.tokens.forEach(et=>{ if(nameTokens.some(nt=>nt===et||nt.includes(et)||et.includes(nt))) hit++; });
+    const score = e.tokens.length ? hit/e.tokens.length : 0;
+    if(hit>0 && score>bestScore){ bestScore=score; best=e; }
+  });
+  if(!best || bestScore<0.4) return {raw:seg, matched:false};
+  let chosen = best;
+  const sameProductOpts = idx.filter(e=>e.pid===best.pid && e.opt!=null);
+  if(sameProductOpts.length>1 && numTokens.length){
+    let cand=null, bestDiff=Infinity;
+    sameProductOpts.forEach(e=>{
+      const target = e.variantNum!=null ? e.variantNum : e.price;
+      numTokens.forEach(n=>{ if(n>=100){ const diff=Math.abs(n-target); if(diff<bestDiff){ bestDiff=diff; cand=e; } } });
+    });
+    if(cand && bestDiff <= Math.max(500, (cand.variantNum||cand.price||0)*0.1)) chosen = cand;
+  }
+  const priceLikeNums = numTokens.filter(n=>n>=100);
+  const qtyCandidates = numTokens.filter(n=>n>=1 && n<=50 && !priceLikeNums.includes(n));
+  const qty = qtyCandidates.length ? qtyCandidates[qtyCandidates.length-1] : 1;
+  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, label:chosen.label, price:chosen.price, qty, stockOk:chosen.stockOk};
+}
+function parseVoiceSegments(transcript){
+  const norm = normalizeSpokenNumbers(transcript);
+  const rawSegs = norm.split(/,|\bdan\b|\bterus\b|\blalu\b|\bserta\b|\bjuga\b/i).map(s=>s.trim()).filter(Boolean);
+  const idx = buildVoiceIndex();
+  return rawSegs.map(seg=>matchVoiceSegment(seg, idx));
+}
+/* onDone(transcript) dipanggil setelah user menekan "Berhenti & Proses" dgn teks hasil dengar (bisa kosong). */
+function openVoiceCapture(onDone){
+  const rec = getSpeechRecognizer('id-ID');
+  if(!rec){
+    alert('Perangkat/browser ini belum mendukung input suara. Pastikan dibuka langsung lewat Safari (bukan dari ikon yang ditambahkan ke Layar Utama) di iPhone/iPad, atau Chrome di Android/desktop.');
+    return;
+  }
+  const bg = modalShell('🎤 Mendengarkan...', `
+    <div style="text-align:center;padding:6px 0;">
+      <div id="vc_dot" style="width:64px;height:64px;border-radius:50%;background:var(--primary,var(--accent));margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff;">🎤</div>
+      <div style="color:var(--text-dim);font-size:12.5px;margin-bottom:10px;">Sebutkan produk satu-satu, contoh: "Luxury Surya satu, busa air lima ribu, papir surya tiga ribu, lem satu"</div>
+      <div id="vc_transcript" style="min-height:44px;font-size:14px;font-weight:600;padding:10px;background:var(--surface-2);border-radius:8px;text-align:left;">...</div>
+      <button class="btn btn-primary" id="vc_stop" style="margin-top:14px;width:100%;">Berhenti &amp; Proses</button>
+    </div>`);
+  let finalText = '';
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.onresult = (e)=>{
+    let interim='', fin='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t = e.results[i][0].transcript;
+      if(e.results[i].isFinal) fin += t+' '; else interim += t;
+    }
+    if(fin) finalText += fin;
+    const el = bg.querySelector('#vc_transcript'); if(el) el.textContent = (finalText+interim).trim() || '...';
+  };
+  rec.onerror = (e)=>{
+    const el = bg.querySelector('#vc_transcript'); if(el) el.textContent = 'Error: '+e.error+'. Tekan mic lagi utk coba ulang.';
+  };
+  let done = false;
+  const finish = ()=>{
+    if(done) return; done = true;
+    try{ rec.stop(); }catch(err){}
+    bg.remove();
+    onDone(finalText.trim());
+  };
+  bg.querySelector('#vc_stop').onclick = finish;
+  bg.onclick = (e)=>{ if(e.target===bg) finish(); };
+  try{ rec.start(); }catch(err){ alert('Gagal memulai mikrofon: '+err.message); bg.remove(); }
+}
+function openVoiceAddToCart(){
+  openVoiceCapture(text=>{
+    if(!text) return;
+    const segs = parseVoiceSegments(text);
+    const bg = modalShell('Konfirmasi Hasil Suara', `
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Terdengar: <i>“${esc(text)}”</i></p>
+      <div id="vr_list"></div>
+      <button class="btn btn-primary" id="vr_add" style="width:100%;margin-top:12px;">Tambahkan ke Keranjang</button>`);
+    function draw(){
+      const list = bg.querySelector('#vr_list');
+      list.innerHTML = segs.map((s,i)=>{
+        if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
+        return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+            <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(s.price)}${s.stockOk===false?' · <span style="color:var(--danger,#dc2626);">stok habis</span>':''}</div>
+          </div>
+          <input type="number" min="1" value="${s.qty}" data-qty="${i}" style="width:54px;padding:5px;text-align:center;">
+          <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
+        </div>`;
+      }).join('') || `<p style="color:var(--text-faint);font-size:13px;">Tidak ada produk yang terdeteksi dari ucapan.</p>`;
+      list.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ segs[el.dataset.qty].qty = Math.max(1, Number(el.value)||1); });
+      list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+    }
+    draw();
+    bg.querySelector('#vr_add').onclick = ()=>{
+      let added=0, skipped=0;
+      segs.filter(s=>s.matched).forEach(s=>{
+        for(let k=0;k<s.qty;k++){
+          const before = STATE.cart.reduce((n,c)=>n+c.qty,0);
+          addToCart(s.pid, s.opt);
+          const after = STATE.cart.reduce((n,c)=>n+c.qty,0);
+          if(after>before) added++; else skipped++;
+        }
+      });
+      bg.remove();
+      if(skipped) alert(added+' item ditambahkan ke keranjang. '+skipped+' gagal ditambahkan (stok tidak cukup).');
+    };
+  });
+}
+function openVoiceToSearch(inputId, onFilled){
+  openVoiceCapture(text=>{
+    if(!text) return;
+    const el = document.getElementById(inputId);
+    if(el){ el.value = text; el.dispatchEvent(new Event('input')); }
+    if(onFilled) onFilled(text);
+  });
+}
+
 /* ---------------- THEME ---------------- */
 function applyTheme(){
   const mode = localStorage.getItem('rt_mode')||'light';
@@ -349,7 +543,10 @@ function renderPOS(){
   el.innerHTML = `
   <div style="display:grid;grid-template-columns:1fr minmax(280px,340px);gap:18px;align-items:start;" id="posGrid">
     <div style="min-width:0;">
-      <input id="posSearch" placeholder="Cari produk..." style="width:100%;margin-bottom:10px;">
+      <div style="display:flex;gap:8px;margin-bottom:10px;">
+        <input id="posSearch" placeholder="Cari produk..." style="flex:1;min-width:0;">
+        <button type="button" id="btnVoiceAdd" class="btn btn-primary" title="Tambah ke keranjang pakai suara" style="padding:8px 14px;white-space:nowrap;">🎤 Suara</button>
+      </div>
       <div id="posCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
       <div id="posBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
       <div id="posProdList" style="max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;"></div>
@@ -385,6 +582,7 @@ function renderPOS(){
   </div>`;
 
   document.getElementById('posSearch').oninput = renderPosProducts;
+  document.getElementById('btnVoiceAdd').onclick = openVoiceAddToCart;
   document.querySelectorAll('[data-pay]').forEach(b=>b.onclick=()=>{ STATE.payMethod=b.dataset.pay; renderPOS(); });
   document.getElementById('posDiscTx').oninput = e=>{ STATE.txDiscount = Number(e.target.value)||0; renderCartSummary(); };
   document.getElementById('posNote').oninput = e=> STATE.note = e.target.value;
@@ -695,7 +893,10 @@ function renderProduk(){
   const el = document.getElementById('mainContent');
   el.innerHTML = pageHeader('Produk', 'Kelola daftar produk & stok'+(STATE.activeBranchId?'':' — semua cabang (read-only, pilih cabang untuk mengelola)')) + `
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
-    <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
+    <div style="display:flex;gap:6px;">
+      <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
+      <button type="button" id="btnVoiceSearchProduk" class="btn btn-ghost" title="Cari pakai suara" style="padding:8px 10px;">🎤</button>
+    </div>
     ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
   </div>
   <div id="prodCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
@@ -825,6 +1026,7 @@ function renderProduk(){
   }
 
   document.getElementById('prodSearch').oninput = draw;
+  document.getElementById('btnVoiceSearchProduk').onclick = ()=>openVoiceToSearch('prodSearch');
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
   drawProdCats();
   draw();
