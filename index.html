@@ -30,7 +30,7 @@
 [data-theme="crimson"][data-mode="dark"]{ --accent:#e0546f; --accent-dim:#e0546f33;}
 
 *{box-sizing:border-box;}
-html,body{height:100%;}
+html,body{height:100%;overscroll-behavior-y:contain;}
 body{margin:0;background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased;
   padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);}
 h1,h2,h3{font-family:'Sora',-apple-system,sans-serif; letter-spacing:-.01em; margin:0;}
@@ -352,11 +352,11 @@ function renderPOS(){
       <input id="posSearch" placeholder="Cari produk..." style="width:100%;margin-bottom:10px;">
       <div id="posCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
       <div id="posBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
-      <div id="posProdList" style="max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;"></div>
+      <div id="posProdList" style="max-height:calc(100vh - 240px);overflow-y:auto;padding:2px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;"></div>
     </div>
     <div class="card" style="padding:16px;position:sticky;top:80px;width:100%;">
       <h3 style="font-size:15px;font-weight:800;margin-bottom:10px;">Keranjang</h3>
-      <div id="cartList" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:12px;"></div>
+      <div id="cartList" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;"></div>
       <div style="border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px;">
         <div style="display:flex;gap:8px;align-items:center;">
           <label style="font-size:12.5px;color:var(--text-dim);width:110px;">Diskon transaksi</label>
@@ -514,6 +514,19 @@ function posCardHtml(p){
   </div>`;
 }
 
+/* Kolom manual (bukan CSS "columns") supaya kartu mengisi penuh dari atas-kiri dulu baru ke kanan,
+   dan scroll-nya ringan/mulus (CSS multi-column berat & suka diseimbangkan sendiri oleh Safari). */
+function posColumnsCount(width){ return Math.max(1, Math.min(6, Math.floor((width+10) / (168+10)))); }
+function posMasonryHtml(items, numCols){
+  if(!items.length) return '';
+  const perCol = Math.ceil(items.length / numCols);
+  const cols = [];
+  for(let i=0;i<numCols;i++){ const chunk = items.slice(i*perCol, (i+1)*perCol); if(chunk.length) cols.push(chunk); }
+  return `<div style="display:flex;gap:10px;align-items:flex-start;">${cols.map(colItems=>
+    `<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:10px;">${colItems.map(posCardHtml).join('')}</div>`
+  ).join('')}</div>`;
+}
+
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
   let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
@@ -521,10 +534,11 @@ function renderPosProducts(){
   if(STATE.posBrand) list = list.filter(p=>p.brand_id===STATE.posBrand);
   const box = document.getElementById('posProdList');
   if(!list.length){ box.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-faint);">Tidak ada produk.</div>`; return; }
+  const numCols = posColumnsCount(box.clientWidth || box.parentElement?.clientWidth || 340);
 
   if(STATE.posBrand){
     // sudah difilter ke satu merek lewat chip — tampilkan langsung, tanpa judul
-    box.innerHTML = `<div class="posMasonry">${list.map(posCardHtml).join('')}</div>`;
+    box.innerHTML = posMasonryHtml(list, numCols);
   } else {
     // kelompokkan otomatis per merek supaya terpisah & rapi
     const groups = {}; const order = [];
@@ -541,13 +555,18 @@ function renderPosProducts(){
     box.innerHTML = order.map((key,i)=>{
       const name = key==='__none__' ? 'Tanpa Merek' : (STATE.brands.find(x=>x.id===key)?.name || '-');
       return `<div style="font-weight:800;font-size:12.5px;letter-spacing:.02em;color:var(--text-dim);margin:${i===0?'2px':'16px'} 2px 8px;text-transform:uppercase;">${esc(name)}</div>
-      <div class="posMasonry">${groups[key].map(posCardHtml).join('')}</div>`;
+      ${posMasonryHtml(groups[key], numCols)}`;
     }).join('');
   }
 
   box.querySelectorAll('.posCardItem').forEach(el=>el.onclick=()=>addToCart(el.dataset.id));
   box.querySelectorAll('[data-bulk]:not(.disabled)').forEach(el=>el.onclick=()=>addToCart(el.dataset.bulk, Number(el.dataset.opt)));
 }
+let _posResizeT = null;
+window.addEventListener('resize', ()=>{
+  clearTimeout(_posResizeT);
+  _posResizeT = setTimeout(()=>{ if(document.getElementById('posProdList')) renderPosProducts(); }, 150);
+});
 
 function addToCart(id, optIdx){
   const p = STATE.products.find(x=>x.id===id);
