@@ -352,12 +352,120 @@ function openVoiceAddToCart(){
     };
   });
 }
-function openVoiceToSearch(inputId, onFilled){
+/* ---- Voice: TAMBAH STOK (restock) — beda konteks dari keranjang:
+   di sini angka yg disebut berarti JUMLAH yg ditambahkan ke stok, bukan harga varian.
+   Curah-pcs: angka besar (>=100) dipakai memilih varian harga, angka kecil = jumlah pcs ditambah.
+   Curah-berat: kata satuan (kg/kilo/ons/gram) menentukan satuan; tanpa kata satuan dianggap KILOGRAM.
+   Produk biasa: angka = jumlah unit ditambah. */
+function buildVoiceStockIndex(){
+  const idx = [];
+  STATE.products.forEach(p=>{
+    if(!p.is_bulk){
+      idx.push({pid:p.id, opt:null, kind:'unit', label:p.name, unitName:(p.units?.name||'pcs'), tokens:voiceTokenize(p.name)});
+    } else if(isPcsBulk(p)){
+      optsOf(p).forEach((o,i)=>{
+        const m = String(o.label||'').match(/\d+/);
+        idx.push({pid:p.id, opt:i, kind:'pcs', label:p.name+' ('+o.label+')', variantNum: m?Number(m[0]):(Number(o.price)||null), tokens:voiceTokenize(p.name+' '+o.label)});
+      });
+    } else {
+      idx.push({pid:p.id, opt:null, kind:'weight', label:p.name, tokens:voiceTokenize(p.name)});
+    }
+  });
+  return idx;
+}
+function matchVoiceStockSegment(seg, idx){
+  const tokens = seg.split(/\s+/).filter(Boolean);
+  const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
+  let best=null, bestScore=0;
+  idx.forEach(e=>{
+    let hit=0;
+    e.tokens.forEach(et=>{ if(nameTokens.some(nt=>nt===et||nt.includes(et)||et.includes(nt))) hit++; });
+    const score = e.tokens.length ? hit/e.tokens.length : 0;
+    if(hit>0 && score>bestScore){ bestScore=score; best=e; }
+  });
+  if(!best || bestScore<0.4) return {raw:seg, matched:false};
+  const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
+  let chosen = best, delta = 0, unitLabel = '';
+  if(best.kind==='pcs'){
+    const sameProductOpts = idx.filter(e=>e.pid===best.pid && e.kind==='pcs');
+    if(sameProductOpts.length>1 && numTokens.length){
+      let cand=null, bestDiff=Infinity;
+      sameProductOpts.forEach(e=>{ numTokens.forEach(n=>{ if(n>=100){ const diff=Math.abs(n-e.variantNum); if(diff<bestDiff){ bestDiff=diff; cand=e; } } }); });
+      if(cand && bestDiff <= Math.max(500, (cand.variantNum||0)*0.1)) chosen = cand;
+    }
+    const priceLikeNums = numTokens.filter(n=>n>=100);
+    const qtyCandidates = numTokens.filter(n=>n>=1 && n<=9999 && !priceLikeNums.includes(n));
+    delta = qtyCandidates.length ? qtyCandidates[qtyCandidates.length-1] : 0;
+    unitLabel = 'pcs';
+  } else if(best.kind==='weight'){
+    let gram = 0;
+    for(let i=0;i<tokens.length;i++){
+      if(/^\d+$/.test(tokens[i])){
+        const n = Number(tokens[i]), nx = tokens[i+1]||'';
+        if(/^(kg|kilo|kilogram)$/.test(nx)) gram = n*1000;
+        else if(/^ons$/.test(nx)) gram = n*100;
+        else if(/^(gram|gr)$/.test(nx)) gram = n*1;
+        else gram = n*1000; // tanpa satuan -> dianggap kilogram
+      }
+    }
+    delta = gram; unitLabel = 'berat';
+  } else {
+    delta = numTokens.length ? numTokens[numTokens.length-1] : 0;
+    unitLabel = best.unitName;
+  }
+  if(!delta || delta<=0) return {raw:seg, matched:false};
+  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, kind:best.kind, label:chosen.label, delta, unitLabel};
+}
+function parseVoiceStockSegments(transcript){
+  const norm = normalizeSpokenNumbers(transcript);
+  const rawSegs = norm.split(/,|\bdan\b|\bterus\b|\blalu\b|\bserta\b|\bjuga\b/i).map(s=>s.trim()).filter(Boolean);
+  const idx = buildVoiceStockIndex();
+  return rawSegs.map(seg=>matchVoiceStockSegment(seg, idx));
+}
+function fmtVoiceDelta(s){
+  if(s.kind==='weight') return fmtG(s.delta);
+  return s.delta.toLocaleString('id-ID')+' '+s.unitLabel;
+}
+function openVoiceStockAdd(){
+  if(!STATE.activeBranchId){ alert('Pilih cabang tertentu dulu (bukan "Semua Cabang") untuk menambah stok.'); return; }
   openVoiceCapture(text=>{
     if(!text) return;
-    const el = document.getElementById(inputId);
-    if(el){ el.value = text; el.dispatchEvent(new Event('input')); }
-    if(onFilled) onFilled(text);
+    const segs = parseVoiceStockSegments(text);
+    const bg = modalShell('Konfirmasi Tambah Stok (Suara)', `
+      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Terdengar: <i>“${esc(text)}”</i></p>
+      <div id="vs_list"></div>
+      <button class="btn btn-primary" id="vs_add" style="width:100%;margin-top:12px;">Tambahkan ke Stok</button>`);
+    function draw(){
+      const list = bg.querySelector('#vs_list');
+      list.innerHTML = segs.map((s,i)=>{
+        if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
+        return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+          <div style="flex:1;min-width:0;">
+            <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+            <div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>
+          </div>
+          <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
+        </div>`;
+      }).join('') || `<p style="color:var(--text-faint);font-size:13px;">Tidak ada produk yang terdeteksi dari ucapan.</p>`;
+      list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+    }
+    draw();
+    bg.querySelector('#vs_add').onclick = async ()=>{
+      const matched = segs.filter(s=>s.matched);
+      if(!matched.length){ bg.remove(); return; }
+      let ok=0, fail=0;
+      for(const s of matched){
+        try{
+          const label = s.kind==='pcs' ? (optsOf(STATE.products.find(x=>x.id===s.pid)||{})[s.opt]?.label ?? null) : null;
+          await applyStockChange({product_id:s.pid, branch_id:STATE.activeBranchId, label, delta:s.delta, type:'in', note:'Tambah stok via suara: "'+s.raw+'"', requireAvail:false});
+          ok++;
+        }catch(err){ fail++; }
+      }
+      bg.remove();
+      alert(ok+' produk berhasil ditambah stoknya.'+(fail?(' '+fail+' gagal.'):''));
+      await loadMaster();
+      renderProduk();
+    };
   });
 }
 
@@ -893,11 +1001,11 @@ function renderProduk(){
   const el = document.getElementById('mainContent');
   el.innerHTML = pageHeader('Produk', 'Kelola daftar produk & stok'+(STATE.activeBranchId?'':' — semua cabang (read-only, pilih cabang untuk mengelola)')) + `
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
-    <div style="display:flex;gap:6px;">
-      <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
-      <button type="button" id="btnVoiceSearchProduk" class="btn btn-ghost" title="Cari pakai suara" style="padding:8px 10px;">🎤</button>
+    <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
+    <div style="display:flex;gap:8px;">
+      ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnVoiceStock" title="Tambah stok pakai suara">🎤 Tambah Stok</button>` : ''}
+      ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
     </div>
-    ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
   </div>
   <div id="prodCatRow" class="scrollnone" style="display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:8px;"></div>
   <div id="prodBrandRow" class="scrollnone" style="display:none;gap:8px;overflow-x:auto;padding-bottom:2px;margin-bottom:10px;"></div>
@@ -1026,7 +1134,7 @@ function renderProduk(){
   }
 
   document.getElementById('prodSearch').oninput = draw;
-  document.getElementById('btnVoiceSearchProduk').onclick = ()=>openVoiceToSearch('prodSearch');
+  const vsBtn = document.getElementById('btnVoiceStock'); if(vsBtn) vsBtn.onclick = openVoiceStockAdd;
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
   drawProdCats();
   draw();
