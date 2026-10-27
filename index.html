@@ -257,8 +257,7 @@ function buildVoiceIndex(){
       idx.push({pid:p.id, opt:null, label:p.name, price:Number(p.sell_price)||0, tokens:voiceTokenize(p.name+' '+alias), stockOk:(p.stock>0)});
     } else if(isPcsBulk(p)){
       optsOf(p).forEach((o,i)=>{
-        const m = String(o.label||'').match(/\d+/);
-        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, variantNum: m?Number(m[0]):(Number(o.price)||null), tokens:voiceTokenize(p.name+' '+o.label+' '+alias), stockOk:((Number(o.stock)||0)>0)});
+        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), stockOk:((Number(o.stock)||0)>0)});
       });
     } else {
       optsOf(p).forEach((o,i)=>{
@@ -423,8 +422,7 @@ function buildVoiceStockIndex(){
       idx.push({pid:p.id, opt:null, kind:'unit', label:p.name, unitName:(p.units?.name||'pcs'), tokens:voiceTokenize(p.name+' '+alias)});
     } else if(isPcsBulk(p)){
       optsOf(p).forEach((o,i)=>{
-        const m = String(o.label||'').match(/\d+/);
-        idx.push({pid:p.id, opt:i, kind:'pcs', label:p.name+' ('+o.label+')', variantNum: m?Number(m[0]):(Number(o.price)||null), tokens:voiceTokenize(p.name+' '+o.label+' '+alias)});
+        idx.push({pid:p.id, opt:i, kind:'pcs', label:p.name+' ('+o.label+')', variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias)});
       });
     } else {
       idx.push({pid:p.id, opt:null, kind:'weight', label:p.name, tokens:voiceTokenize(p.name+' '+alias)});
