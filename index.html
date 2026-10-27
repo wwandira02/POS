@@ -314,32 +314,26 @@ function voiceErrorMessage(code){
   };
   return map[code] || ('Error: '+code+'. Coba lagi.');
 }
-function openVoiceCapture(onDone){
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SR){
-    alert('Perangkat/browser ini belum mendukung input suara. Pastikan dibuka langsung lewat Safari (bukan dari ikon yang ditambahkan ke Layar Utama) di iPhone/iPad, atau Chrome di Android/desktop.');
-    return;
-  }
-  if(window.navigator.standalone){
-    alert('Fitur suara tidak bisa dipakai kalau aplikasi ini dibuka dari ikon di Layar Utama (ini batasan dari Apple). Buka alamat websitenya langsung lewat aplikasi Safari biasa, lalu coba lagi.');
-    return;
-  }
-  const bg = modalShell('🎤 Mendengarkan...', `
-    <div style="text-align:center;padding:6px 0;">
-      <div id="vc_dot" style="width:64px;height:64px;border-radius:50%;background:var(--primary,var(--accent));margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:28px;color:#fff;">🎤</div>
-      <div style="color:var(--text-dim);font-size:12.5px;margin-bottom:10px;">Sebutkan produk satu-satu, contoh: "Luxury Surya satu, busa air lima ribu, papir surya tiga ribu, lem satu"</div>
-      <div id="vc_transcript" style="min-height:44px;font-size:14px;font-weight:600;padding:10px;background:var(--surface-2);border-radius:8px;text-align:left;">Menyiapkan mikrofon...</div>
-      <button class="btn btn-primary" id="vc_stop" style="margin-top:14px;width:100%;">Berhenti &amp; Proses</button>
-    </div>`);
-  let finalText = '';
-  let stopped = false;
-  let rec = null;
-  function startOne(){
-    rec = new SR();
+/* Tangkap SATU kali ucap (sekali tekan = sekali ucap, TANPA auto-restart) -> resolve(teks).
+   onInterim(opsional) dipanggil berkali-kali sambil bicara utk menampilkan progres real-time. */
+function captureOneUtterance(onInterim){
+  return new Promise(resolve=>{
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){
+      alert('Perangkat/browser ini belum mendukung input suara. Pastikan dibuka langsung lewat Safari (bukan dari ikon yang ditambahkan ke Layar Utama) di iPhone/iPad, atau Chrome di Android/desktop.');
+      resolve(''); return;
+    }
+    if(window.navigator.standalone){
+      alert('Fitur suara tidak bisa dipakai kalau aplikasi ini dibuka dari ikon di Layar Utama (ini batasan dari Apple). Buka alamat websitenya langsung lewat aplikasi Safari biasa, lalu coba lagi.');
+      resolve(''); return;
+    }
+    const rec = new SR();
     rec.lang = 'id-ID';
     rec.interimResults = true;
-    rec.continuous = false; // continuous:true tidak stabil di Safari iOS/iPad -> dengar sekali lalu auto-restart
+    rec.continuous = false; // SEKALI ucap saja per tekan -> tidak ada acara restart-nyambung yg bikin teks ngawur
     rec.maxAlternatives = 1;
+    let finalText = '';
+    let settled = false;
     rec.onresult = (e)=>{
       let interim='', fin='';
       for(let i=0;i<e.results.length;i++){
@@ -347,70 +341,74 @@ function openVoiceCapture(onDone){
         if(e.results[i].isFinal) fin += t+' '; else interim += t;
       }
       if(fin) finalText += fin;
-      const el = bg.querySelector('#vc_transcript'); if(el) el.textContent = (finalText+interim).trim() || '...';
+      if(onInterim) onInterim((finalText+interim).trim());
     };
     rec.onerror = (e)=>{
-      const el = bg.querySelector('#vc_transcript');
-      if(el) el.textContent = (finalText ? finalText+' ' : '') + voiceErrorMessage(e.error);
-      if(e.error==='not-allowed' || e.error==='service-not-allowed' || e.error==='audio-capture'){
-        stopped = true; // error menetap -> jangan spam auto-restart
-      }
+      if(settled) return;
+      if(onInterim) onInterim(voiceErrorMessage(e.error));
+      if(e.error!=='no-speech'){ settled=true; resolve(''); }
     };
-    rec.onend = ()=>{ if(!stopped){ try{ rec.start(); }catch(err){} } };
-    try{ rec.start(); }catch(err){
-      const el = bg.querySelector('#vc_transcript'); if(el) el.textContent = 'Gagal memulai mikrofon: '+err.message;
-    }
-  }
-  startOne();
-  const finish = ()=>{
-    if(stopped && finalText==='') { /* biarkan tetap bisa diproses meski sempat error */ }
-    stopped = true;
-    try{ rec && rec.stop(); }catch(err){}
-    bg.remove();
-    onDone(finalText.trim());
-  };
-  bg.querySelector('#vc_stop').onclick = finish;
-  bg.onclick = (e)=>{ if(e.target===bg) finish(); };
+    rec.onend = ()=>{ if(settled) return; settled=true; resolve(finalText.trim()); };
+    try{ rec.start(); }catch(err){ if(onInterim) onInterim('Gagal memulai mikrofon: '+err.message); resolve(''); }
+  });
 }
 function openVoiceAddToCart(){
-  openVoiceCapture(text=>{
-    if(!text) return;
-    const segs = parseVoiceSegments(text);
-    const bg = modalShell('Konfirmasi Hasil Suara', `
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Terdengar: <i>“${esc(text)}”</i></p>
-      <div id="vr_list"></div>
-      <button class="btn btn-primary" id="vr_add" style="width:100%;margin-top:12px;">Tambahkan ke Keranjang</button>`);
-    function draw(){
-      const list = bg.querySelector('#vr_list');
-      list.innerHTML = segs.map((s,i)=>{
-        if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
-        return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
-            <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(s.price)}${s.stockOk===false?' · <span style="color:var(--danger,#dc2626);">stok habis</span>':''}</div>
-          </div>
-          <input type="number" min="1" value="${s.qty}" data-qty="${i}" style="width:54px;padding:5px;text-align:center;">
-          <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
-        </div>`;
-      }).join('') || `<p style="color:var(--text-faint);font-size:13px;">Tidak ada produk yang terdeteksi dari ucapan.</p>`;
-      list.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ segs[el.dataset.qty].qty = Math.max(1, Number(el.value)||1); });
-      list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+  const bg = modalShell('Tambah ke Keranjang pakai Suara', `
+    <button type="button" class="btn btn-primary" id="vf_mic" style="width:100%;font-weight:700;">🎤 Ucapkan 1 Produk</button>
+    <div id="vf_status" style="font-size:12.5px;color:var(--text-dim);margin:8px 0;min-height:16px;text-align:center;"></div>
+    <div id="vf_list"></div>
+    <button class="btn btn-primary" id="vf_commit" style="width:100%;margin-top:10px;">Tambahkan ke Keranjang</button>`);
+  let segs = [];
+  function draw(){
+    const list = bg.querySelector('#vf_list');
+    list.innerHTML = segs.map((s,i)=>{
+      if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+          <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(s.price)}${s.stockOk===false?' · <span style="color:var(--danger,#dc2626);">stok habis</span>':''}</div>
+        </div>
+        <input type="number" min="1" value="${s.qty}" data-qty="${i}" style="width:54px;padding:5px;text-align:center;">
+        <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
+      </div>`;
+    }).join('') || `<p style="color:var(--text-faint);font-size:13px;text-align:center;">Belum ada produk. Tekan tombol mic lalu sebutkan 1 produk.</p>`;
+    list.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ segs[el.dataset.qty].qty = Math.max(1, Number(el.value)||1); });
+    list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+  }
+  draw();
+  let busy = false;
+  bg.querySelector('#vf_mic').onclick = async ()=>{
+    if(busy) return; busy = true;
+    const micBtn = bg.querySelector('#vf_mic'), statusEl = bg.querySelector('#vf_status');
+    micBtn.disabled = true; micBtn.textContent = '🎙️ Mendengarkan...';
+    statusEl.textContent = '';
+    const text = await captureOneUtterance(t=>{ statusEl.textContent = t; });
+    micBtn.disabled = false; micBtn.textContent = '🎤 Ucapkan 1 Produk';
+    busy = false;
+    if(text){
+      const newSegs = parseVoiceSegments(text);
+      segs = segs.concat(newSegs);
+      statusEl.textContent = 'Terdengar: "'+text+'"';
+      draw();
+    } else if(!statusEl.textContent){
+      statusEl.textContent = 'Tidak terdengar apa-apa, coba lagi.';
     }
-    draw();
-    bg.querySelector('#vr_add').onclick = ()=>{
-      let added=0, skipped=0;
-      segs.filter(s=>s.matched).forEach(s=>{
-        for(let k=0;k<s.qty;k++){
-          const before = STATE.cart.reduce((n,c)=>n+c.qty,0);
-          addToCart(s.pid, s.opt);
-          const after = STATE.cart.reduce((n,c)=>n+c.qty,0);
-          if(after>before) added++; else skipped++;
-        }
-      });
-      bg.remove();
-      if(skipped) alert(added+' item ditambahkan ke keranjang. '+skipped+' gagal ditambahkan (stok tidak cukup).');
-    };
-  });
+  };
+  bg.querySelector('#vf_commit').onclick = ()=>{
+    const matched = segs.filter(s=>s.matched);
+    if(!matched.length){ bg.remove(); return; }
+    let added=0, skipped=0;
+    matched.forEach(s=>{
+      for(let k=0;k<s.qty;k++){
+        const before = STATE.cart.reduce((n,c)=>n+c.qty,0);
+        addToCart(s.pid, s.opt);
+        const after = STATE.cart.reduce((n,c)=>n+c.qty,0);
+        if(after>before) added++; else skipped++;
+      }
+    });
+    bg.remove();
+    if(skipped) alert(added+' item ditambahkan ke keranjang. '+skipped+' gagal ditambahkan (stok tidak cukup).');
+  };
 }
 /* ---- Voice: TAMBAH STOK (restock) — beda konteks dari keranjang:
    di sini angka yg disebut berarti JUMLAH yg ditambahkan ke stok, bukan harga varian.
@@ -489,45 +487,61 @@ function fmtVoiceDelta(s){
 }
 function openVoiceStockAdd(){
   if(!STATE.activeBranchId){ alert('Pilih cabang tertentu dulu (bukan "Semua Cabang") untuk menambah stok.'); return; }
-  openVoiceCapture(text=>{
-    if(!text) return;
-    const segs = parseVoiceStockSegments(text);
-    const bg = modalShell('Konfirmasi Tambah Stok (Suara)', `
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">Terdengar: <i>“${esc(text)}”</i></p>
-      <div id="vs_list"></div>
-      <button class="btn btn-primary" id="vs_add" style="width:100%;margin-top:12px;">Tambahkan ke Stok</button>`);
-    function draw(){
-      const list = bg.querySelector('#vs_list');
-      list.innerHTML = segs.map((s,i)=>{
-        if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
-        return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
-          <div style="flex:1;min-width:0;">
-            <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
-            <div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>
-          </div>
-          <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
-        </div>`;
-      }).join('') || `<p style="color:var(--text-faint);font-size:13px;">Tidak ada produk yang terdeteksi dari ucapan.</p>`;
-      list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+  const bg = modalShell('Tambah Stok pakai Suara', `
+    <button type="button" class="btn btn-primary" id="vs_mic" style="width:100%;font-weight:700;">🎤 Ucapkan 1 Produk</button>
+    <div id="vs_status" style="font-size:12.5px;color:var(--text-dim);margin:8px 0;min-height:16px;text-align:center;"></div>
+    <div id="vs_list"></div>
+    <button class="btn btn-primary" id="vs_add" style="width:100%;margin-top:10px;">Tambahkan ke Stok</button>`);
+  let segs = [];
+  function draw(){
+    const list = bg.querySelector('#vs_list');
+    list.innerHTML = segs.map((s,i)=>{
+      if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+          <div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>
+        </div>
+        <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
+      </div>`;
+    }).join('') || `<p style="color:var(--text-faint);font-size:13px;text-align:center;">Belum ada produk. Tekan tombol mic lalu sebutkan 1 produk.</p>`;
+    list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+  }
+  draw();
+  let busy = false;
+  bg.querySelector('#vs_mic').onclick = async ()=>{
+    if(busy) return; busy = true;
+    const micBtn = bg.querySelector('#vs_mic'), statusEl = bg.querySelector('#vs_status');
+    micBtn.disabled = true; micBtn.textContent = '🎙️ Mendengarkan...';
+    statusEl.textContent = '';
+    const text = await captureOneUtterance(t=>{ statusEl.textContent = t; });
+    micBtn.disabled = false; micBtn.textContent = '🎤 Ucapkan 1 Produk';
+    busy = false;
+    if(text){
+      const newSegs = parseVoiceStockSegments(text);
+      segs = segs.concat(newSegs);
+      statusEl.textContent = 'Terdengar: "'+text+'"';
+      draw();
+    } else if(!statusEl.textContent){
+      statusEl.textContent = 'Tidak terdengar apa-apa, coba lagi.';
     }
-    draw();
-    bg.querySelector('#vs_add').onclick = async ()=>{
-      const matched = segs.filter(s=>s.matched);
-      if(!matched.length){ bg.remove(); return; }
-      let ok=0, fail=0;
-      for(const s of matched){
-        try{
-          const label = s.kind==='pcs' ? (optsOf(STATE.products.find(x=>x.id===s.pid)||{})[s.opt]?.label ?? null) : null;
-          await applyStockChange({product_id:s.pid, branch_id:STATE.activeBranchId, label, delta:s.delta, type:'in', note:'Tambah stok via suara: "'+s.raw+'"', requireAvail:false});
-          ok++;
-        }catch(err){ fail++; }
-      }
-      bg.remove();
-      alert(ok+' produk berhasil ditambah stoknya.'+(fail?(' '+fail+' gagal.'):''));
-      await loadMaster();
-      renderProduk();
-    };
-  });
+  };
+  bg.querySelector('#vs_add').onclick = async ()=>{
+    const matched = segs.filter(s=>s.matched);
+    if(!matched.length){ bg.remove(); return; }
+    let ok=0, fail=0;
+    for(const s of matched){
+      try{
+        const label = s.kind==='pcs' ? (optsOf(STATE.products.find(x=>x.id===s.pid)||{})[s.opt]?.label ?? null) : null;
+        await applyStockChange({product_id:s.pid, branch_id:STATE.activeBranchId, label, delta:s.delta, type:'in', note:'Tambah stok via suara: "'+s.raw+'"', requireAvail:false});
+        ok++;
+      }catch(err){ fail++; }
+    }
+    bg.remove();
+    alert(ok+' produk berhasil ditambah stoknya.'+(fail?(' '+fail+' gagal.'):''));
+    await loadMaster();
+    renderProduk();
+  };
 }
 
 /* ---------------- THEME ---------------- */
