@@ -542,6 +542,13 @@ function openVoiceStockAdd(){
   };
 }
 
+/* Pencarian produk: cocokkan nama, merek, kategori, dan alias suara (semua kata yg diketik harus ketemu di salah satunya). */
+function prodMatchesSearch(p, s){
+  s = String(s||'').trim().toLowerCase();
+  if(!s) return true;
+  const hay = [p.name, p.brands?.name, p.categories?.name, p.voice_alias].filter(Boolean).join(' ').toLowerCase();
+  return s.split(/\s+/).every(w=>hay.includes(w));
+}
 /* ---------------- SALIN & TEMPEL DAFTAR PRODUK/STOK ---------------- */
 function copyText(text){
   if(navigator.clipboard && window.isSecureContext){ return navigator.clipboard.writeText(text); }
@@ -554,7 +561,7 @@ function copyText(text){
 /* Salin daftar produk (sesuai filter yg sedang tampil) sbg teks tab-separated: tinggal paste ke Notes/Excel/Sheets. */
 function copyProductList(){
   const s = (document.getElementById('prodSearch')?.value||'').toLowerCase();
-  let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
+  let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
   if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
   if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
   const rows = [['Nama','Stok','Harga Beli','Harga Jual','Min Stok','Merek','Kategori']];
@@ -1121,7 +1128,7 @@ function posMasonryHtml(items, numCols){
 
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
-  let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
+  let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
   if(STATE.posCat) list = list.filter(p=>p.category_id===STATE.posCat);
   if(STATE.posBrand) list = list.filter(p=>p.brand_id===STATE.posBrand);
   const box = document.getElementById('posProdList');
@@ -1339,7 +1346,7 @@ function renderProduk(){
 
   function draw(){
     const s = (document.getElementById('prodSearch').value||'').toLowerCase();
-    let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
+    let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
     if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
     if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
 
