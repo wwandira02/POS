@@ -470,8 +470,8 @@ function matchVoiceStockSegment(seg, idx){
     delta = numTokens.length ? numTokens[numTokens.length-1] : 0;
     unitLabel = best.unitName;
   }
-  if(!delta || delta<=0) return {raw:seg, matched:false};
-  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, kind:best.kind, label:chosen.label, delta, unitLabel};
+  // produk dikenali tapi jumlah tidak disebut -> tetap tampil sbg produk (jumlah diisi manual di daftar), bukan "tidak dikenali"
+  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, kind:best.kind, label:chosen.label, delta:(delta>0?delta:0), unitLabel};
 }
 function parseVoiceStockSegments(transcript){
   const norm = normalizeSpokenNumbers(transcript);
@@ -498,12 +498,19 @@ function openVoiceStockAdd(){
       return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
         <div style="flex:1;min-width:0;">
           <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
-          <div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>
+          ${s.delta>0 ? `<div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>` : `<div style="font-size:11px;color:#d97706;">Jumlah belum disebut — isi di kanan</div>`}
         </div>
+        ${s.delta>0 ? '' : `<input type="number" inputmode="decimal" min="0" step="any" data-dq="${i}" placeholder="Jumlah" style="width:76px;padding:5px;text-align:center;">${s.kind==='weight'?`<select data-du="${i}" style="width:68px;"><option value="1000">kg</option><option value="100">ons</option><option value="1">gram</option></select>`:''}`}
         <button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:5px 8px;">✕</button>
       </div>`;
     }).join('') || `<p style="color:var(--text-faint);font-size:13px;text-align:center;">Belum ada produk. Tekan tombol mic lalu sebutkan 1 produk.</p>`;
     list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
+    const setDq = i=>{
+      const q = list.querySelector('[data-dq="'+i+'"]'), u = list.querySelector('[data-du="'+i+'"]');
+      segs[i].delta = Math.max(0, Math.round((Number(q.value)||0) * (u ? Number(u.value) : 1)));
+    };
+    list.querySelectorAll('[data-dq]').forEach(el=>el.oninput=()=>setDq(el.dataset.dq));
+    list.querySelectorAll('[data-du]').forEach(el=>el.onchange=()=>setDq(el.dataset.du));
   }
   draw();
   let busy = false;
@@ -527,6 +534,7 @@ function openVoiceStockAdd(){
   bg.querySelector('#vs_add').onclick = async ()=>{
     const matched = segs.filter(s=>s.matched);
     if(!matched.length){ bg.remove(); return; }
+    if(matched.some(s=>!(s.delta>0))){ alert('Ada produk yang jumlahnya belum diisi. Isi jumlahnya atau hapus barisnya (✕).'); return; }
     let ok=0, fail=0;
     for(const s of matched){
       try{
