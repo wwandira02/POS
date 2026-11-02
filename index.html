@@ -542,6 +542,172 @@ function openVoiceStockAdd(){
   };
 }
 
+/* ---------------- SALIN & TEMPEL DAFTAR PRODUK/STOK ---------------- */
+function copyText(text){
+  if(navigator.clipboard && window.isSecureContext){ return navigator.clipboard.writeText(text); }
+  return new Promise((res,rej)=>{
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try{ document.execCommand('copy') ? res() : rej(new Error('copy gagal')); }catch(e){ rej(e); } finally{ ta.remove(); }
+  });
+}
+/* Salin daftar produk (sesuai filter yg sedang tampil) sbg teks tab-separated: tinggal paste ke Notes/Excel/Sheets. */
+function copyProductList(){
+  const s = (document.getElementById('prodSearch')?.value||'').toLowerCase();
+  let list = STATE.products.filter(p=>p.name.toLowerCase().includes(s));
+  if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
+  if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
+  const rows = [['Nama','Stok','Harga Beli','Harga Jual','Min Stok','Merek','Kategori']];
+  list.forEach(p=>{
+    const brand = p.brands?.name||'', cat = p.categories?.name||'';
+    if(p.is_bulk && isPcsBulk(p)){
+      optsOf(p).forEach(o=>rows.push([p.name+' ('+o.label+')', Number(o.stock)||0, Number(o.buy_price)||0, Number(o.price)||0, Number(o.min_stock)||0, brand, cat]));
+    } else if(p.is_bulk){
+      rows.push([p.name+' (curah, kg)', (Number(p.stock)||0)/1000, Number(p.buy_price)||0, '', (Number(p.min_stock)||0)/1000, brand, cat]);
+    } else {
+      rows.push([p.name, Number(p.stock)||0, Number(p.buy_price)||0, Number(p.sell_price)||0, Number(p.min_stock)||0, brand, cat]);
+    }
+  });
+  copyText(rows.map(r=>r.join('\t')).join('\n'))
+    .then(()=>alert(list.length+' produk disalin. Tinggal paste di Notes / Excel / Google Sheets.'))
+    .catch(()=>alert('Gagal menyalin otomatis. Coba lagi lewat Safari langsung (https).'));
+}
+function parseNumLoose(s){
+  s = String(s==null?'':s).trim().toLowerCase().replace(/^rp\.?\s*/,'');
+  if(!s) return null;
+  let mult = 1;
+  if(/(rb|ribu|k)$/.test(s)){ mult = 1000; s = s.replace(/(rb|ribu|k)$/,'').trim(); }
+  if(!/^[\d.,]+$/.test(s)) return null;
+  if(/^\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g,'');       // 5.000 / 12.500.000
+  else s = s.replace(',', '.');                                      // 2,5
+  const n = Number(s);
+  return isNaN(n) ? null : n*mult;
+}
+/* Parse teks tempelan jadi baris {name, stock, buy, sell, min, brandName, catName}. Kolom default: Nama, Stok, Harga Beli, Harga Jual, Min Stok.
+   Pemisah: tab | ; atau koma. Kalau tanpa pemisah: angka di ujung baris dianggap kolom berikutnya ("Surya 16 10" = stok 10). */
+function parsePastedProducts(text){
+  const lines = String(text||'').split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  if(!lines.length) return [];
+  const splitLine = l=>{
+    if(/\t|\||;/.test(l)) return l.split(/\t|\||;/).map(x=>x.trim());
+    if(l.includes(',')){
+      const parts = l.split(',').map(x=>x.trim());
+      const hdr = parts.length>1 && parts.every(x=>/^(nama|produk|stok|stock|qty|jumlah|harga|beli|jual|modal|min|merek|brand|kategori|category)/i.test(x));
+      if(parts.length>=2 && (parseNumLoose(parts[1])!==null || hdr)) return parts;
+    }
+    const toks = l.split(/\s+/); let num = null;
+    if(toks.length>1 && parseNumLoose(toks[toks.length-1])!==null){ num = toks.pop(); }  // tanpa pemisah: hanya angka terakhir = stok
+    const name = toks.join(' ').replace(/[\s:=\-–xX]+$/,'').trim();
+    return num===null ? [name] : [name, num];
+  };
+  let map = {name:0, stock:1, buy:2, sell:3, min:4, brand:5, cat:6};
+  let start = 0;
+  const first = splitLine(lines[0]).map(x=>x.toLowerCase());
+  const isHeader = first.length>1 && first.some(x=>/^(nama|produk|stok|stock|qty|jumlah|harga|beli|jual|modal|min)/.test(x)) && first.slice(1).every(x=>parseNumLoose(x)===null);
+  if(isHeader){
+    start = 1; map = {name:-1,stock:-1,buy:-1,sell:-1,min:-1,brand:-1,cat:-1};
+    first.forEach((h,i)=>{
+      if(/nama|produk/.test(h)) map.name=i; else if(/min/.test(h)) map.min=i;
+      else if(/beli|modal/.test(h)) map.buy=i; else if(/jual|harga/.test(h)) map.sell=i;
+      else if(/stok|stock|qty|jumlah/.test(h)) map.stock=i; else if(/merek|brand/.test(h)) map.brand=i; else if(/kategori|category/.test(h)) map.cat=i;
+    });
+    if(map.name<0) map.name=0;
+  }
+  const get = (c,k)=> map[k]>=0 ? c[map[k]] : undefined;
+  return lines.slice(start).map(l=>{
+    const c = splitLine(l);
+    const name = String(get(c,'name')||'').trim();
+    return {name, stock:parseNumLoose(get(c,'stock')), buy:parseNumLoose(get(c,'buy')), sell:parseNumLoose(get(c,'sell')), min:parseNumLoose(get(c,'min')), brandName:String(get(c,'brand')||'').trim(), catName:String(get(c,'cat')||'').trim()};
+  }).filter(r=>r.name);
+}
+function openPasteImport(){
+  if(!STATE.activeBranchId){ alert('Pilih cabang tertentu dulu (bukan "Semua Cabang").'); return; }
+  const catOpts = '<option value="">— Tanpa kategori —</option>'+sortedCategories().map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  const brandOpts = '<option value="">— Tanpa merek —</option>'+STATE.brands.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('');
+  const bg = modalShell('Tempel Daftar Produk & Stok', `
+    <div id="pi_step1">
+      <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">Tempel dari Notes/Excel, 1 produk per baris. Urutan kolom: <b>Nama, Stok, Harga Beli, Harga Jual, Min Stok</b> (pemisah tab, koma, | atau ;). Tanpa pemisah juga boleh utk stok saja: <i>"Surya 16 10"</i> (angka terakhir = stok, "Surya 16" tetap nama). Baris judul (Nama, Stok, ...) otomatis dikenali.</div>
+      <textarea id="pi_text" rows="9" placeholder="Surya 16, 10, 18000, 22000&#10;Lem Fox, 5, 3000, 5000" style="width:100%;font-family:inherit;"></textarea>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <select id="pi_cat" style="flex:1;min-width:0;">${catOpts}</select>
+        <select id="pi_brand" style="flex:1;min-width:0;">${brandOpts}</select>
+      </div>
+      <div style="font-size:11px;color:var(--text-faint);margin:4px 0 8px;">Kategori/merek di atas dipakai utk produk BARU yg tidak punya kolom merek/kategori sendiri.</div>
+      <button class="btn btn-primary" id="pi_parse" style="width:100%;">Lanjut — Cek Hasil</button>
+    </div>
+    <div id="pi_step2" style="display:none;"></div>`);
+  bg.querySelector('#pi_parse').onclick = ()=>{
+    const rows = parsePastedProducts(bg.querySelector('#pi_text').value);
+    if(!rows.length){ alert('Tidak ada baris yang terbaca.'); return; }
+    const defCat = bg.querySelector('#pi_cat').value||null, defBrand = bg.querySelector('#pi_brand').value||null;
+    rows.forEach(r=>{
+      const ex = STATE.products.find(p=>p.name.trim().toLowerCase()===r.name.toLowerCase());
+      r.existing = ex||null;
+      r.cat = (r.catName && STATE.categories.find(c=>c.name.toLowerCase()===r.catName.toLowerCase())?.id) || defCat;
+      r.brand = (r.brandName && STATE.brands.find(b=>b.name.toLowerCase()===r.brandName.toLowerCase())?.id) || defBrand;
+    });
+    bg.querySelector('#pi_step1').style.display='none';
+    const s2 = bg.querySelector('#pi_step2'); s2.style.display='block';
+    function draw(){
+      s2.innerHTML = `
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;margin-bottom:8px;">
+          <span>Produk yg sudah ada:</span>
+          <select id="pi_mode"><option value="add">Tambah ke stok</option><option value="set">Timpa stok</option><option value="skip">Lewati</option></select>
+          <label style="display:flex;gap:4px;align-items:center;"><input type="checkbox" id="pi_price"> perbarui harga juga</label>
+        </div>
+        <div style="max-height:46vh;overflow:auto;border:1px solid var(--border);border-radius:8px;">
+          <table style="width:100%;font-size:12px;border-collapse:collapse;">
+            <thead><tr style="text-align:left;"><th style="padding:6px;">Nama</th><th>Stok</th><th>Beli</th><th>Jual</th><th>Status</th><th></th></tr></thead>
+            <tbody>${rows.map((r,i)=>{
+              const bulk = r.existing && r.existing.is_bulk;
+              const st = bulk ? '<span style="color:var(--danger,#dc2626);">curah — lewati</span>' : (r.existing ? 'Sudah ada' : '<b>Baru</b>');
+              const warn = (!r.existing && !(r.sell>0)) ? ' <span style="color:#d97706;" title="Harga jual kosong">⚠ jual 0</span>' : '';
+              return `<tr style="border-top:1px solid var(--border);"><td style="padding:6px;">${esc(r.name)}</td><td>${r.stock??'-'}</td><td>${r.buy??'-'}</td><td>${r.sell??'-'}</td><td>${st}${warn}</td><td><button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:2px 8px;">✕</button></td></tr>`;
+            }).join('')}</tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="btn btn-ghost" id="pi_back" style="flex:0 0 auto;">← Kembali</button>
+          <button class="btn btn-primary" id="pi_go" style="flex:1;">Impor ${rows.length} Baris</button>
+        </div>`;
+      s2.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ rows.splice(Number(el.dataset.rm),1); if(!rows.length){ bg.remove(); return; } const m=s2.querySelector('#pi_mode').value, p=s2.querySelector('#pi_price').checked; draw(); s2.querySelector('#pi_mode').value=m; s2.querySelector('#pi_price').checked=p; });
+      s2.querySelector('#pi_back').onclick = ()=>{ s2.style.display='none'; bg.querySelector('#pi_step1').style.display='block'; };
+      s2.querySelector('#pi_go').onclick = async ()=>{
+        const mode = s2.querySelector('#pi_mode').value, upPrice = s2.querySelector('#pi_price').checked;
+        const goBtn = s2.querySelector('#pi_go'); goBtn.disabled = true; goBtn.textContent = 'Mengimpor...';
+        let created=0, updated=0, skipped=0, failed=0;
+        const newRows = rows.filter(r=>!r.existing).map(r=>({
+          name:r.name, brand_id:r.brand, category_id:r.cat, is_bulk:false, unit_id:null,
+          buy_price:r.buy||0, sell_price:r.sell||0, min_stock:r.min||0, stock:r.stock||0, sell_options:[], branch_id:STATE.activeBranchId
+        }));
+        if(newRows.length){
+          const res = await sb.from('products').insert(newRows);
+          if(res.error){ alert('Gagal menambah produk baru: '+res.error.message); failed += newRows.length; } else created = newRows.length;
+        }
+        for(const r of rows.filter(r=>r.existing)){
+          const p = r.existing;
+          if(p.is_bulk || mode==='skip'){ skipped++; continue; }
+          try{
+            if(r.stock!=null){
+              const delta = mode==='set' ? r.stock - (Number(p.stock)||0) : r.stock;
+              if(delta!==0) await applyStockChange({product_id:p.id, branch_id:p.branch_id, label:null, delta, type: delta>0?'in':'out', note:'Impor tempel daftar ('+(mode==='set'?'timpa':'tambah')+')', requireAvail:false});
+            }
+            if(upPrice){
+              const upd = {}; if(r.buy!=null) upd.buy_price=r.buy; if(r.sell!=null) upd.sell_price=r.sell; if(r.min!=null) upd.min_stock=r.min;
+              if(Object.keys(upd).length) await sb.from('products').update(upd).eq('id', p.id);
+            }
+            updated++;
+          }catch(err){ failed++; }
+        }
+        bg.remove();
+        alert('Selesai: '+created+' produk baru, '+updated+' diperbarui'+(skipped?', '+skipped+' dilewati':'')+(failed?', '+failed+' gagal':'')+'.');
+        await loadProducts(); renderProduk();
+      };
+    }
+    draw();
+  };
+}
+
 /* ---------------- THEME ---------------- */
 function applyTheme(){
   const mode = localStorage.getItem('rt_mode')||'light';
@@ -1073,7 +1239,9 @@ function renderProduk(){
   el.innerHTML = pageHeader('Produk', 'Kelola daftar produk & stok'+(STATE.activeBranchId?'':' — semua cabang (read-only, pilih cabang untuk mengelola)')) + `
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap;">
     <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button type="button" class="btn btn-ghost" id="btnCopyList" title="Salin daftar produk & stok">📋 Salin</button>
+      ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnPasteList" title="Tempel daftar dari Notes/Excel">📥 Tempel Daftar</button>` : ''}
       ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnVoiceStock" title="Tambah stok pakai suara">🎤 Tambah Stok</button>` : ''}
       ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
     </div>
@@ -1206,6 +1374,8 @@ function renderProduk(){
 
   document.getElementById('prodSearch').oninput = draw;
   const vsBtn = document.getElementById('btnVoiceStock'); if(vsBtn) vsBtn.onclick = openVoiceStockAdd;
+  document.getElementById('btnCopyList').onclick = copyProductList;
+  const plBtn = document.getElementById('btnPasteList'); if(plBtn) plBtn.onclick = openPasteImport;
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
   drawProdCats();
   draw();
