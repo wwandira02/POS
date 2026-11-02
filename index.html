@@ -1280,6 +1280,7 @@ function renderProduk(){
           <div style="display:flex;gap:4px;">
             <button class="btn btn-ghost" data-stock="${p.id}" style="padding:5px 8px;">±Stok</button>
             ${STATE.activeBranchId?`<button class="btn btn-ghost" data-edit="${p.id}" style="padding:5px 8px;">Edit</button>
+            <button class="btn btn-ghost" data-dup="${p.id}" title="Salin produk ini, tinggal ganti nama" style="padding:5px 8px;">📄 Salin</button>
             <button class="btn btn-danger" data-hapus="${p.id}" style="padding:5px 8px;">Hapus</button>`:''}
           </div>
         </td>
@@ -1311,6 +1312,7 @@ function renderProduk(){
       }).join('');
     }
     document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>openProductModal(b.dataset.edit));
+    document.querySelectorAll('[data-dup]').forEach(b=>b.onclick=()=>openProductModal(null, b.dataset.dup));
     document.querySelectorAll('[data-hapus]').forEach(b=>b.onclick=()=>deleteProduct(b.dataset.hapus));
     document.querySelectorAll('[data-stock]').forEach(b=>b.onclick=()=>openStockModal(b.dataset.stock));
   }
@@ -1427,46 +1429,49 @@ function optRowHtmlPcs(o, locked){
   </div>`;
 }
 
-function openProductModal(id){
+function openProductModal(id, dupId){
   const p = id ? STATE.products.find(x=>x.id===id) : null;
-  const isBulk = !!p?.is_bulk;
-  const bulkKind = p?.bulk_unit==='pcs' ? 'pcs' : 'berat';
-  const opts = isBulk ? optsOf(p) : (bulkKind==='pcs' ? DEFAULT_OPTS_PCS : DEFAULT_OPTS);
-  const bg = modalShell(p?'Edit Produk':'Tambah Produk', `
+  const src = (!p && dupId) ? STATE.products.find(x=>x.id===dupId) : null; // duplikat: salin data, tapi disimpan sbg produk BARU
+  const t = p || src;
+  const isBulk = !!t?.is_bulk;
+  const bulkKind = t?.bulk_unit==='pcs' ? 'pcs' : 'berat';
+  let opts = isBulk ? optsOf(t) : (bulkKind==='pcs' ? DEFAULT_OPTS_PCS : DEFAULT_OPTS);
+  if(src) opts = opts.map(o=>({...o, stock:0})); // stok tidak ikut disalin
+  const bg = modalShell(p?'Edit Produk':(src?'Duplikat Produk — ganti nama':'Tambah Produk'), `
     <div style="display:flex;flex-direction:column;gap:10px;">
-      <div><label style="font-size:12px;color:var(--text-dim);">Nama Produk</label><input id="f_name" value="${esc(p?.name||'')}" style="width:100%;margin-top:4px;"></div>
+      <div><label style="font-size:12px;color:var(--text-dim);">Nama Produk</label><input id="f_name" value="${esc(t?.name||'')}" style="width:100%;margin-top:4px;"></div>
       <div>
         <label style="font-size:12px;color:var(--text-dim);">Alias Suara (opsional)</label>
         <input id="f_valias" value="${esc(p?.voice_alias||'')}" placeholder="mis: look suri, luk suri" style="width:100%;margin-top:4px;">
         <div style="font-size:11px;color:var(--text-faint);margin-top:3px;">Isi kalau nama produk ini sering salah didengar fitur suara (🎤). Pisahkan pakai koma kalau lebih dari satu.</div>
       </div>
       <div style="display:flex;gap:8px;">
-        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Merek</label><select id="f_brand" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.brands.map(b=>`<option value="${b.id}" ${p?.brand_id===b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>
-        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Kategori</label><select id="f_cat" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.categories.map(c=>`<option value="${c.id}" ${p?.category_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Merek</label><select id="f_brand" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.brands.map(b=>`<option value="${b.id}" ${t?.brand_id===b.id?'selected':''}>${esc(b.name)}</option>`).join('')}</select></div>
+        <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Kategori</label><select id="f_cat" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.categories.map(c=>`<option value="${c.id}" ${t?.category_id===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
       </div>
 
-      <label style="display:flex;gap:8px;align-items:flex-start;background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:12.5px;cursor:${p?'not-allowed':'pointer'};">
-        <input type="checkbox" id="f_bulk" ${isBulk?'checked':''} ${p?'disabled':''} style="margin-top:2px;">
+      <label style="display:flex;gap:8px;align-items:flex-start;background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:12.5px;cursor:${(p||src)?'not-allowed':'pointer'};">
+        <input type="checkbox" id="f_bulk" ${isBulk?'checked':''} ${(p||src)?'disabled':''} style="margin-top:2px;">
         <span><b>Produk curah</b> — stok dipakai bersama untuk beberapa pilihan harga (per kg/ons, atau per pcs/satuan).${p?'<br><i style="color:var(--text-faint);">Jenis produk tidak bisa diubah setelah dibuat.</i>':''}</span>
       </label>
 
       <!-- PRODUK BIASA -->
       <div id="sec_normal" style="display:${isBulk?'none':'flex'};flex-direction:column;gap:10px;">
-        <div><label style="font-size:12px;color:var(--text-dim);">Satuan</label><select id="f_unit" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.units.map(u=>`<option value="${u.id}" ${p?.unit_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></div>
+        <div><label style="font-size:12px;color:var(--text-dim);">Satuan</label><select id="f_unit" style="width:100%;margin-top:4px;"><option value="">-</option>${STATE.units.map(u=>`<option value="${u.id}" ${t?.unit_id===u.id?'selected':''}>${esc(u.name)}</option>`).join('')}</select></div>
         <div style="display:flex;gap:8px;">
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli</label><input id="f_buy" type="number" value="${!isBulk?(p?.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Jual</label><input id="f_sell" type="number" value="${!isBulk?(p?.sell_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli</label><input id="f_buy" type="number" value="${!isBulk?(t?.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Jual</label><input id="f_sell" type="number" value="${!isBulk?(t?.sell_price||0):0}" style="width:100%;margin-top:4px;"></div>
         </div>
         <div style="display:flex;gap:8px;">
           ${!p?`<div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Stok Awal</label><input id="f_stock" type="number" value="0" style="width:100%;margin-top:4px;"></div>`:''}
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label><input id="f_min" type="number" value="${!isBulk?(p?.min_stock||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label><input id="f_min" type="number" value="${!isBulk?(t?.min_stock||0):0}" style="width:100%;margin-top:4px;"></div>
         </div>
       </div>
 
       <!-- PRODUK CURAH -->
       <div id="sec_bulk" style="display:${isBulk?'flex':'none'};flex-direction:column;gap:10px;">
         <div><label style="font-size:12px;color:var(--text-dim);">Jenis curah</label>
-          <select id="fb_kind" style="width:100%;margin-top:4px;" ${p?'disabled':''}>
+          <select id="fb_kind" style="width:100%;margin-top:4px;" ${(p||src)?'disabled':''}>
             <option value="berat" ${bulkKind==='berat'?'selected':''}>Berdasarkan berat (kg / ons / gram)</option>
             <option value="pcs" ${bulkKind==='pcs'?'selected':''}>Berdasarkan pcs / satuan (mis. papir, box)</option>
           </select>
@@ -1474,7 +1479,7 @@ function openProductModal(id){
 
         <!-- CURAH BERDASARKAN BERAT -->
         <div id="sec_bulk_berat" style="display:${bulkKind==='pcs'?'none':'flex'};flex-direction:column;gap:10px;">
-          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per kg (Rp)</label><input id="fb_buy" type="number" min="0" value="${isBulk&&bulkKind==='berat'?(p.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
+          <div style="flex:1;"><label style="font-size:12px;color:var(--text-dim);">Harga Beli per kg (Rp)</label><input id="fb_buy" type="number" min="0" value="${isBulk&&bulkKind==='berat'?(t.buy_price||0):0}" style="width:100%;margin-top:4px;"></div>
           ${!p?`<div>
             <label style="font-size:12px;color:var(--text-dim);">Stok Awal</label>
             <div style="display:flex;gap:6px;margin-top:4px;">
@@ -1485,7 +1490,7 @@ function openProductModal(id){
           <div>
             <label style="font-size:12px;color:var(--text-dim);">Minimum Stok</label>
             <div style="display:flex;gap:6px;margin-top:4px;">
-              <input id="fb_min" type="number" min="0" step="any" value="${isBulk&&bulkKind==='berat'?(p.min_stock||0):0}" style="flex:1;min-width:0;">
+              <input id="fb_min" type="number" min="0" step="any" value="${isBulk&&bulkKind==='berat'?(t.min_stock||0):0}" style="flex:1;min-width:0;">
               <select id="fb_min_unit" style="width:90px;">
                 <option value="1000" ${!(isBulk&&bulkKind==='berat')?'selected':''}>kg</option>
                 <option value="1" ${isBulk&&bulkKind==='berat'?'selected':''}>gram</option>
@@ -1514,6 +1519,7 @@ function openProductModal(id){
       <button class="btn btn-primary" id="f_save" style="margin-top:6px;">Simpan</button>
     </div>`);
 
+  if(src){ const fn = bg.querySelector('#f_name'); fn.focus(); fn.select(); }
   const bulkChk = bg.querySelector('#f_bulk');
   bulkChk.onchange = ()=>{
     bg.querySelector('#sec_normal').style.display = bulkChk.checked ? 'none' : 'flex';
