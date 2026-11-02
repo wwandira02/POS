@@ -708,6 +708,55 @@ function openPasteImport(){
   };
 }
 
+/* ---------------- SALIN PRODUK ANTAR CABANG ---------------- */
+function openCopyToBranch(){
+  if(!STATE.activeBranchId){ alert('Pilih cabang asal dulu (bukan "Semua Cabang").'); return; }
+  const others = STATE.branches.filter(b=>b.id!==STATE.activeBranchId);
+  if(!others.length){ alert('Belum ada cabang lain. Tambahkan cabang dulu di menu Cabang.'); return; }
+  const from = STATE.branches.find(b=>b.id===STATE.activeBranchId);
+  const list = [...STATE.products];
+  const bg = modalShell('Salin Produk ke Cabang Lain', `
+    <div style="font-size:12.5px;color:var(--text-dim);margin-bottom:8px;">Dari cabang <b>${esc(from?.name||'')}</b> ke:</div>
+    <select id="cb_to" style="width:100%;margin-bottom:8px;">${others.map(b=>`<option value="${b.id}">${esc(b.name)}</option>`).join('')}</select>
+    <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-bottom:4px;"><input type="checkbox" id="cb_stock"> Ikut salin jumlah stok (kalau tidak dicentang, stok cabang tujuan mulai dari 0)</label>
+    <div style="font-size:11.5px;color:var(--text-faint);margin-bottom:8px;">Produk yang namanya sudah ada di cabang tujuan otomatis dilewati. Harga, merek, kategori, dan varian ikut disalin.</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:12.5px;">
+      <label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" id="cb_all" checked> Pilih semua (<span id="cb_cnt">${list.length}</span>)</label>
+    </div>
+    <div style="max-height:40vh;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:4px 8px;">
+      ${list.map((x,i)=>`<label style="display:flex;gap:8px;align-items:center;padding:5px 0;font-size:12.5px;border-bottom:1px solid var(--border);"><input type="checkbox" class="cb_item" data-i="${i}" checked> <span style="flex:1;min-width:0;">${esc(x.name)}</span><span style="color:var(--text-faint);font-size:11px;">${x.brands?.name?esc(x.brands.name):''}</span></label>`).join('') || '<div style="padding:10px;color:var(--text-faint);">Belum ada produk.</div>'}
+    </div>
+    <button class="btn btn-primary" id="cb_go" style="width:100%;margin-top:10px;">Salin</button>`);
+  const items = ()=>[...bg.querySelectorAll('.cb_item')];
+  const refresh = ()=>{ bg.querySelector('#cb_cnt').textContent = items().filter(c=>c.checked).length; };
+  bg.querySelector('#cb_all').onchange = e=>{ items().forEach(c=>c.checked=e.target.checked); refresh(); };
+  items().forEach(c=>c.onchange=refresh);
+  bg.querySelector('#cb_go').onclick = async ()=>{
+    const toId = bg.querySelector('#cb_to').value, withStock = bg.querySelector('#cb_stock').checked;
+    const chosen = items().filter(c=>c.checked).map(c=>list[Number(c.dataset.i)]);
+    if(!chosen.length){ alert('Pilih minimal satu produk.'); return; }
+    const btn = bg.querySelector('#cb_go'); btn.disabled = true; btn.textContent = 'Menyalin...';
+    const ex = await sb.from('products').select('name').eq('branch_id', toId);
+    if(ex.error){ alert('Gagal cek cabang tujuan: '+ex.error.message); btn.disabled=false; btn.textContent='Salin'; return; }
+    const have = new Set((ex.data||[]).map(r=>String(r.name).trim().toLowerCase()));
+    const rows = []; let dup = 0;
+    chosen.forEach(x=>{
+      if(have.has(String(x.name).trim().toLowerCase())){ dup++; return; }
+      const opts = Array.isArray(x.sell_options) ? x.sell_options.map(o=> (x.is_bulk && x.bulk_unit==='pcs') ? {...o, stock: withStock ? (Number(o.stock)||0) : 0} : {...o}) : [];
+      const row = { name:x.name, brand_id:x.brand_id||null, category_id:x.category_id||null, unit_id:x.unit_id||null,
+        is_bulk:!!x.is_bulk, bulk_unit:x.bulk_unit||null, buy_price:x.buy_price||0, sell_price:x.sell_price||0,
+        min_stock:x.min_stock||0, sell_options:opts, stock: withStock ? (Number(x.stock)||0) : 0, branch_id:toId };
+      if(x.voice_alias) row.voice_alias = x.voice_alias;
+      rows.push(row);
+    });
+    if(!rows.length){ bg.remove(); alert('Semua produk yang dipilih sudah ada di cabang tujuan ('+dup+' dilewati).'); return; }
+    const res = await sb.from('products').insert(rows);
+    bg.remove();
+    if(res.error){ alert('Gagal menyalin: '+res.error.message); return; }
+    alert(rows.length+' produk disalin ke '+(STATE.branches.find(b=>b.id===toId)?.name||'cabang tujuan')+(dup?' ('+dup+' dilewati karena sudah ada)':'')+'.\n\nPindah ke cabang tujuan untuk melihat hasilnya.');
+  };
+}
+
 /* ---------------- THEME ---------------- */
 function applyTheme(){
   const mode = localStorage.getItem('rt_mode')||'light';
@@ -1241,6 +1290,7 @@ function renderProduk(){
     <input id="prodSearch" placeholder="Cari produk..." style="width:220px;">
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button type="button" class="btn btn-ghost" id="btnCopyList" title="Salin daftar produk & stok">📋 Salin</button>
+      ${STATE.activeBranchId && STATE.branches.length>1 ? `<button type="button" class="btn btn-ghost" id="btnCopyBranch" title="Salin produk ke cabang lain">🏬 Salin ke Cabang</button>` : ''}
       ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnPasteList" title="Tempel daftar dari Notes/Excel">📥 Tempel Daftar</button>` : ''}
       ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnVoiceStock" title="Tambah stok pakai suara">🎤 Tambah Stok</button>` : ''}
       ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
@@ -1377,6 +1427,7 @@ function renderProduk(){
   document.getElementById('prodSearch').oninput = draw;
   const vsBtn = document.getElementById('btnVoiceStock'); if(vsBtn) vsBtn.onclick = openVoiceStockAdd;
   document.getElementById('btnCopyList').onclick = copyProductList;
+  const cbBtn = document.getElementById('btnCopyBranch'); if(cbBtn) cbBtn.onclick = openCopyToBranch;
   const plBtn = document.getElementById('btnPasteList'); if(plBtn) plBtn.onclick = openPasteImport;
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
   drawProdCats();
@@ -1612,15 +1663,17 @@ function openStockModal(id){
   const opts = pcsBulk ? optsOf(p) : [];
   const bg = modalShell('Ubah Stok — '+p.name, `
     <p style="font-size:13px;color:var(--text-dim);margin-bottom:10px;">Stok saat ini: <b>${esc(fmtStock(p))}</b></p>
-    ${pcsBulk?`<div style="margin-bottom:10px;">
-      <label style="font-size:12px;color:var(--text-dim);">Varian</label>
-      <select id="s_variant" style="width:100%;margin-top:4px;">${opts.map((o,i)=>`<option value="${i}">${esc(o.label)} (stok saat ini: ${Number(o.stock)||0})</option>`).join('')}</select>
-    </div>`:''}
     <div style="display:flex;gap:8px;margin-bottom:10px;">
       <button class="tabbtn active" data-type="in" style="flex:1;">Tambah Stok</button>
       <button class="tabbtn" data-type="out" style="flex:1;">Kurangi Stok</button>
     </div>
-    <div style="display:flex;gap:8px;margin-bottom:8px;">
+    ${pcsBulk?`<div id="s_rows" style="border:1px solid var(--border);border-radius:8px;margin-bottom:8px;max-height:46vh;overflow:auto;">
+      ${opts.map((o,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);">
+        <div style="flex:1;min-width:0;font-size:13px;"><b>${esc(o.label)}</b> <span style="color:var(--text-faint);font-size:11.5px;">stok ${Number(o.stock)||0}</span></div>
+        <input type="number" inputmode="numeric" min="0" step="1" class="s_vqty" data-i="${i}" placeholder="0" style="width:84px;text-align:center;">
+      </div>`).join('')}
+    </div><div style="font-size:11.5px;color:var(--text-faint);margin-bottom:8px;">Isi jumlah di varian yang berubah saja, kosongkan yang lain. Tekan Enter untuk pindah ke varian berikutnya; Enter di yang terakhir = Simpan.</div>`:''}
+    <div style="display:${pcsBulk?'none':'flex'};gap:8px;margin-bottom:8px;">
       <input id="s_qty" type="number" min="0" step="${weightBulk?'any':'1'}" placeholder="Jumlah" style="flex:1;min-width:0;">
       ${weightBulk?`<select id="s_unit" style="width:90px;"><option value="1000">kg</option><option value="1">gram</option></select>`:''}
     </div>
@@ -1630,18 +1683,39 @@ function openStockModal(id){
     <div id="s_history" style="font-size:12px;color:var(--text-dim);max-height:160px;overflow-y:auto;">Memuat...</div>`);
   let type='in';
   bg.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{ type=b.dataset.type; bg.querySelectorAll('[data-type]').forEach(x=>x.classList.remove('active')); b.classList.add('active'); });
-  bg.querySelector('#s_save').onclick = async ()=>{
+  const doSave = async ()=>{
+    const btn = bg.querySelector('#s_save'); if(btn.disabled) return;
+    const note = bg.querySelector('#s_note').value;
+    if(pcsBulk){
+      const todo = [...bg.querySelectorAll('.s_vqty')].map(inp=>({o:opts[Number(inp.dataset.i)], q:Math.round(Number(inp.value)||0)})).filter(x=>x.q>0);
+      if(!todo.length){ alert('Isi jumlah minimal di satu varian.'); return; }
+      btn.disabled=true; btn.textContent='Menyimpan...';
+      const failed=[];
+      for(const x of todo){ // berurutan (bukan paralel) supaya data varian tidak saling timpa
+        try{ await applyStockChange({product_id:p.id, branch_id:p.branch_id, label:x.o.label, delta:type==='in'?x.q:-x.q, type, note, requireAvail:true}); }
+        catch(err){ failed.push(x.o.label+': '+err.message); }
+      }
+      if(failed.length) alert('Sebagian gagal:\n'+failed.join('\n'));
+      bg.remove(); await loadProducts(); renderProduk();
+      return;
+    }
     const raw = Number(bg.querySelector('#s_qty').value);
     const qty = weightBulk ? Math.round(raw * Number(bg.querySelector('#s_unit').value)) : Math.round(raw);
     if(!qty || qty<=0){ alert('Jumlah tidak valid.'); return; }
     const change = type==='in'?qty:-qty;
-    const label = pcsBulk ? opts[Number(bg.querySelector('#s_variant').value)]?.label : null;
-    const btn = bg.querySelector('#s_save'); btn.disabled=true; btn.textContent='Menyimpan...';
+    btn.disabled=true; btn.textContent='Menyimpan...';
     try{
-      await applyStockChange({product_id:p.id, branch_id:p.branch_id, label, delta:change, type, note:bg.querySelector('#s_note').value, requireAvail:true});
+      await applyStockChange({product_id:p.id, branch_id:p.branch_id, label:null, delta:change, type, note, requireAvail:true});
       bg.remove(); await loadProducts(); renderProduk();
     }catch(err){ alert('Gagal menyimpan: '+err.message); btn.disabled=false; btn.textContent='Simpan'; }
   };
+  bg.querySelector('#s_save').onclick = doSave;
+  const qtyInputs = [...bg.querySelectorAll('.s_vqty')];
+  qtyInputs.forEach((inp,i)=>{
+    inp.onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); if(qtyInputs[i+1]) qtyInputs[i+1].focus(); else doSave(); } };
+  });
+  if(qtyInputs[0]) setTimeout(()=>qtyInputs[0].focus(), 50);
+  const sq = bg.querySelector('#s_qty'); if(sq) sq.onkeydown = e=>{ if(e.key==='Enter'){ e.preventDefault(); doSave(); } };
   const showQty = (q)=> weightBulk ? (q>0?'+':'-')+fmtG(Math.abs(q)) : (q>0?'+':'')+q;
   sb.from('stock_history').select('*').eq('product_id', id).order('created_at',{ascending:false}).limit(10).then(({data})=>{
     bg.querySelector('#s_history').innerHTML = (data||[]).map(h=>`<div style="padding:4px 0;border-bottom:1px solid var(--border);">${fmtDateTime(h.created_at)} · <b style="color:${h.change_qty>0?'var(--accent)':'var(--danger)'}">${esc(showQty(Number(h.change_qty)))}</b> · ${esc(h.type)} ${h.note?'· '+esc(h.note):''}</div>`).join('') || 'Belum ada riwayat.';
