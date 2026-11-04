@@ -565,6 +565,14 @@ function openVoiceStockAdd(){
   };
 }
 
+/* Filter chip kategori halaman Produk: id kategori, atau '__nocat__' = tanpa kategori, '__nobrand__' = tanpa merek. */
+function prodCatMatch(p){
+  const c = STATE.prodCat;
+  if(!c) return true;
+  if(c==='__nocat__') return !p.category_id;
+  if(c==='__nobrand__') return !p.brand_id;
+  return p.category_id===c;
+}
 /* Pencarian produk: cocokkan nama, merek, kategori, dan alias suara (semua kata yg diketik harus ketemu di salah satunya). */
 function prodMatchesSearch(p, s){
   s = String(s||'').trim().toLowerCase();
@@ -585,7 +593,7 @@ function copyText(text){
 function copyProductList(){
   const s = (document.getElementById('prodSearch')?.value||'').toLowerCase();
   let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
-  if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
+  if(STATE.prodCat) list = list.filter(prodCatMatch);
   if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
   const rows = [['Nama','Stok','Harga Beli','Harga Jual','Min Stok','Merek','Kategori']];
   list.forEach(p=>{
@@ -1400,7 +1408,7 @@ function renderProduk(){
   function draw(){
     const s = (document.getElementById('prodSearch').value||'').toLowerCase();
     let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
-    if(STATE.prodCat) list = list.filter(p=>p.category_id===STATE.prodCat);
+    if(STATE.prodCat) list = list.filter(prodCatMatch);
     if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
 
     if(!list.length){
@@ -1429,7 +1437,7 @@ function renderProduk(){
 
   function drawLowStock(){
     let prods = STATE.products;
-    if(STATE.prodCat) prods = prods.filter(p=>p.category_id===STATE.prodCat);
+    if(STATE.prodCat) prods = prods.filter(prodCatMatch);
     if(STATE.prodBrand) prods = prods.filter(p=>p.brand_id===STATE.prodBrand);
     const rows = [];
     prods.forEach(p=>{
@@ -1452,7 +1460,7 @@ function renderProduk(){
 
   function drawProdCats(){
     const box = document.getElementById('prodCatRow');
-    const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories()];
+    const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories(), {id:'__nocat__', name:'Tanpa Kategori'}, {id:'__nobrand__', name:'Tanpa Merek'}];
     box.innerHTML = all.map(c=>{
       const active = (STATE.prodCat||'') === c.id;
       return `<button class="tabbtn ${active?'active':''}" data-pcatchip="${c.id}" style="white-space:nowrap;flex:none;">${esc(c.name)}</button>`;
@@ -1468,7 +1476,7 @@ function renderProduk(){
   function drawProdBrands(){
     const box = document.getElementById('prodBrandRow');
     if(!STATE.prodCat){ box.style.display='none'; box.innerHTML=''; return; }
-    const idsHere = new Set(STATE.products.filter(p=>p.category_id===STATE.prodCat && p.brand_id).map(p=>p.brand_id));
+    const idsHere = new Set(STATE.products.filter(p=>prodCatMatch(p) && p.brand_id).map(p=>p.brand_id));
     const brandsHere = STATE.brands.filter(b=>idsHere.has(b.id));
     if(!brandsHere.length){ box.style.display='none'; box.innerHTML=''; return; }
     box.style.display='flex';
