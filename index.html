@@ -566,8 +566,8 @@ function openVoiceStockAdd(){
 }
 
 /* Filter chip kategori halaman Produk: id kategori, atau '__nocat__' = tanpa kategori, '__nobrand__' = tanpa merek. */
-function prodCatMatch(p){
-  const c = STATE.prodCat;
+function prodCatMatch(p, c){
+  if(c===undefined) c = STATE.prodCat;
   if(!c) return true;
   if(c==='__nocat__') return !p.category_id;
   if(c==='__nobrand__') return !p.brand_id;
@@ -593,7 +593,7 @@ function copyText(text){
 function copyProductList(){
   const s = (document.getElementById('prodSearch')?.value||'').toLowerCase();
   let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
-  if(STATE.prodCat) list = list.filter(prodCatMatch);
+  if(STATE.prodCat) list = list.filter(p=>prodCatMatch(p));
   if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
   const rows = [['Nama','Stok','Harga Beli','Harga Jual','Min Stok','Merek','Kategori']];
   list.forEach(p=>{
@@ -1088,7 +1088,7 @@ function sortedCategories(){
 function renderPosCats(){
   const box = document.getElementById('posCatRow');
   if(!box) return;
-  const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories()];
+  const all = [{id:'', name:'Semua Kategori'}, ...sortedCategories(), {id:'__nocat__', name:'Tanpa Kategori'}, {id:'__nobrand__', name:'Tanpa Merek'}];
   box.innerHTML = all.map(c=>{
     const active = (STATE.posCat||'') === c.id;
     return `<button class="tabbtn ${active?'active':''}" data-catchip="${c.id}" style="white-space:nowrap;flex:none;">${esc(c.name)}</button>`;
@@ -1107,7 +1107,7 @@ function renderPosBrands(){
   const box = document.getElementById('posBrandRow');
   if(!box) return;
   if(!STATE.posCat){ box.style.display='none'; box.innerHTML=''; return; }
-  const idsHere = new Set(STATE.products.filter(p=>p.category_id===STATE.posCat && p.brand_id).map(p=>p.brand_id));
+  const idsHere = new Set(STATE.products.filter(p=>prodCatMatch(p, STATE.posCat) && p.brand_id).map(p=>p.brand_id));
   const brandsHere = STATE.brands.filter(b=>idsHere.has(b.id));
   if(!brandsHere.length){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display='flex';
@@ -1189,7 +1189,7 @@ function posMasonryHtml(items, numCols){
 function renderPosProducts(){
   const s = (document.getElementById('posSearch').value||'').toLowerCase();
   let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
-  if(STATE.posCat) list = list.filter(p=>p.category_id===STATE.posCat);
+  if(STATE.posCat) list = list.filter(p=>prodCatMatch(p, STATE.posCat));
   if(STATE.posBrand) list = list.filter(p=>p.brand_id===STATE.posBrand);
   const box = document.getElementById('posProdList');
   if(!list.length){ box.innerHTML = `<div style="padding:30px;text-align:center;color:var(--text-faint);">Tidak ada produk.</div>`; return; }
@@ -1408,7 +1408,7 @@ function renderProduk(){
   function draw(){
     const s = (document.getElementById('prodSearch').value||'').toLowerCase();
     let list = STATE.products.filter(p=>prodMatchesSearch(p,s));
-    if(STATE.prodCat) list = list.filter(prodCatMatch);
+    if(STATE.prodCat) list = list.filter(p=>prodCatMatch(p));
     if(STATE.prodBrand) list = list.filter(p=>p.brand_id===STATE.prodBrand);
 
     if(!list.length){
@@ -1437,7 +1437,7 @@ function renderProduk(){
 
   function drawLowStock(){
     let prods = STATE.products;
-    if(STATE.prodCat) prods = prods.filter(prodCatMatch);
+    if(STATE.prodCat) prods = prods.filter(p=>prodCatMatch(p));
     if(STATE.prodBrand) prods = prods.filter(p=>p.brand_id===STATE.prodBrand);
     const rows = [];
     prods.forEach(p=>{
