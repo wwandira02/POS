@@ -903,6 +903,7 @@ function logout(){ localStorage.removeItem('rt_session'); STATE.session=null; re
 const NAV_OWNER = [
   {id:'pos', label:'Kasir / POS', icon:'🧾'},
   {id:'produk', label:'Produk', icon:'📦'},
+  {id:'pembukaan', label:'Pembukaan Barang', icon:'📭'},
   {id:'distributor', label:'Distributor', icon:'🚚'},
   {id:'laporan', label:'Laporan Keuangan', icon:'📊'},
   {id:'cabang', label:'Cabang', icon:'🏢'},
@@ -911,6 +912,7 @@ const NAV_OWNER = [
 ];
 const NAV_KASIR = [
   {id:'pos', label:'Kasir / POS', icon:'🧾'},
+  {id:'pembukaan', label:'Pembukaan Barang', icon:'📭'},
   {id:'riwayat', label:'Riwayat Saya', icon:'🧮'},
   {id:'pengaturan', label:'Pengaturan', icon:'⚙️'},
 ];
@@ -982,6 +984,7 @@ function renderShell(){
   const page = STATE.page;
   if(page==='pos') renderPOS();
   else if(page==='produk') renderProduk();
+  else if(page==='pembukaan') renderPembukaan();
   else if(page==='distributor') renderDistributor();
   else if(page==='laporan') renderLaporan();
   else if(page==='cabang') renderCabang();
@@ -2357,6 +2360,135 @@ function renderPengaturan(){
   </div>`;
   document.querySelectorAll('[data-setmode]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_mode', b.dataset.setmode); applyTheme(); renderPengaturan(); });
   document.querySelectorAll('[data-settheme]').forEach(b=>b.onclick=()=>{ localStorage.setItem('rt_theme', b.dataset.settheme); applyTheme(); renderPengaturan(); });
+}
+
+/* ---------------- PEMBUKAAN BARANG (catatan barang yang dibuka per hari) ---------------- */
+function localDateStr(d){ d = d||new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+const OPENING_SQL = `create table if not exists openings (
+  id uuid primary key default gen_random_uuid(),
+  branch_id text,
+  opened_date date not null default current_date,
+  product_id text,
+  product_name text not null,
+  brand_name text,
+  variant_label text,
+  qty numeric not null default 1,
+  staff_id text,
+  staff_name text,
+  created_at timestamptz default now()
+);
+alter table openings disable row level security;
+create index if not exists openings_date_idx on openings(opened_date);`;
+function openingLabel(r){ return [r.brand_name, r.product_name].filter(Boolean).join(' ') + (r.variant_label ? ' ('+r.variant_label+')' : ''); }
+async function renderPembukaan(){
+  const el = document.getElementById('mainContent');
+  if(!STATE.openDate) STATE.openDate = localDateStr();
+  const isOwner = STATE.session.staff.role==='owner';
+  el.innerHTML = pageHeader('Pembukaan Barang', 'Catatan barang yang dibuka (tidak mengubah stok)') + `
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+    <div class="card" style="flex:1 1 340px;min-width:0;padding:16px;">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+        <input type="date" id="opDate" value="${STATE.openDate}" style="flex:1;min-width:140px;">
+        <button type="button" class="btn btn-ghost" id="opToday">Hari ini</button>
+      </div>
+      <div id="opList" style="min-height:60px;">Memuat...</div>
+      <div id="opFoot" style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:8px;flex-wrap:wrap;"></div>
+    </div>
+    <div style="flex:1 1 340px;min-width:0;display:flex;flex-direction:column;gap:16px;">
+      <div class="card" style="padding:16px;">
+        <div style="font-weight:700;margin-bottom:8px;">Tambah barang yang dibuka</div>
+        <input id="opSearch" placeholder="Ketik nama / merek, lalu tekan produknya..." style="width:100%;">
+        <div id="opResults" style="margin-top:8px;max-height:44vh;overflow:auto;"></div>
+      </div>
+      <div class="card" style="padding:16px;">
+        <div style="font-weight:700;margin-bottom:8px;">Riwayat hari-hari sebelumnya</div>
+        <div id="opHist" style="font-size:13px;">Memuat...</div>
+      </div>
+    </div>
+  </div>`;
+  let rows = [];
+  const brandOf = p=> p.brands?.name || STATE.brands.find(b=>b.id===p.brand_id)?.name || '';
+  const branchQ = q=> STATE.activeBranchId ? q.eq('branch_id', STATE.activeBranchId) : q;
+  const sqlHint = ()=>`<div style="font-size:12.5px;color:var(--danger,#dc2626);">Tabel <b>openings</b> belum ada. Jalankan SQL ini sekali di Supabase → SQL Editor:</div><textarea readonly style="width:100%;height:170px;font-size:11px;margin-top:6px;">${esc(OPENING_SQL)}</textarea>`;
+
+  async function loadDay(){
+    const box = document.getElementById('opList');
+    const r = await branchQ(sb.from('openings').select('*').eq('opened_date', STATE.openDate).order('created_at'));
+    if(r.error){ box.innerHTML = sqlHint(); document.getElementById('opFoot').innerHTML=''; return false; }
+    rows = r.data||[];
+    drawList();
+    return true;
+  }
+  function drawList(){
+    const box = document.getElementById('opList');
+    if(!rows.length){ box.innerHTML = `<div style="color:var(--text-faint);font-size:13px;text-align:center;padding:14px 0;">Belum ada barang yang dicatat dibuka pada ${fmtDate(STATE.openDate+'T12:00:00')}.</div>`; }
+    else box.innerHTML = rows.map((r,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div style="width:24px;color:var(--text-faint);font-size:12.5px;">${i+1}.</div>
+      <div style="flex:1;min-width:0;"><div style="font-weight:600;font-size:13.5px;">${esc(openingLabel(r))}</div>
+        <div style="font-size:11px;color:var(--text-faint);">${esc(r.staff_name||'')}${STATE.activeBranchId?'':' · '+esc(branchName(r.branch_id))}</div></div>
+      <button type="button" class="btn btn-ghost" data-opm="${r.id}" style="padding:4px 10px;">−</button>
+      <div style="min-width:24px;text-align:center;font-weight:700;">${Number(r.qty)}</div>
+      <button type="button" class="btn btn-ghost" data-opp="${r.id}" style="padding:4px 10px;">+</button>
+      ${(isOwner || r.staff_id===String(STATE.session.staff.id)) ? `<button type="button" class="btn btn-ghost" data-opx="${r.id}" style="padding:4px 8px;">✕</button>` : ''}
+    </div>`).join('');
+    const total = rows.reduce((n,r)=>n+Number(r.qty||0),0);
+    document.getElementById('opFoot').innerHTML = rows.length
+      ? `<div style="font-size:12.5px;color:var(--text-dim);">${rows.length} jenis · ${total} item</div><button type="button" class="btn btn-ghost" id="opCopy">📋 Salin Catatan</button>` : '';
+    const cp = document.getElementById('opCopy');
+    if(cp) cp.onclick = ()=>{
+      const txt = fmtDate(STATE.openDate+'T12:00:00')+':\n'+rows.map((r,i)=>(i+1)+'. '+openingLabel(r).replace(/ \((.*)\)$/,' $1')+' '+Number(r.qty)).join('\n');
+      copyText(txt).then(()=>alert('Catatan disalin.')).catch(()=>alert('Gagal menyalin.'));
+    };
+    box.querySelectorAll('[data-opp]').forEach(b=>b.onclick=()=>changeQty(b.dataset.opp, +1));
+    box.querySelectorAll('[data-opm]').forEach(b=>b.onclick=()=>changeQty(b.dataset.opm, -1));
+    box.querySelectorAll('[data-opx]').forEach(b=>b.onclick=async()=>{ if(!confirm('Hapus catatan ini?')) return; await sb.from('openings').delete().eq('id', b.dataset.opx); await loadDay(); loadHist(); });
+  }
+  async function changeQty(id, d){
+    const r = rows.find(x=>x.id===id); if(!r) return;
+    const q = Number(r.qty)+d;
+    if(q<=0){ if(!confirm('Jumlah jadi 0, hapus catatan ini?')) return; await sb.from('openings').delete().eq('id', id); }
+    else await sb.from('openings').update({qty:q}).eq('id', id);
+    await loadDay(); loadHist();
+  }
+  async function addOpening(p, label){
+    if(!STATE.activeBranchId){ alert('Pilih cabang dulu (bukan "Semua Cabang") untuk mencatat.'); return; }
+    const exist = rows.find(r=>r.product_id===String(p.id) && (r.variant_label||'')===(label||'') && r.branch_id===String(STATE.activeBranchId));
+    let res;
+    if(exist) res = await sb.from('openings').update({qty:Number(exist.qty)+1}).eq('id', exist.id);
+    else res = await sb.from('openings').insert({ branch_id:String(STATE.activeBranchId), opened_date:STATE.openDate, product_id:String(p.id), product_name:p.name, brand_name:brandOf(p)||null, variant_label:label||null, qty:1, staff_id:String(STATE.session.staff.id), staff_name:STATE.session.staff.name });
+    if(res.error){ alert('Gagal mencatat: '+res.error.message); return; }
+    await loadDay(); loadHist();
+  }
+  function drawResults(){
+    const q = document.getElementById('opSearch').value;
+    const box = document.getElementById('opResults');
+    if(!q.trim()){ box.innerHTML = '<div style="font-size:12px;color:var(--text-faint);">Hasil pencarian muncul di sini. Produk yang sama ditekan lagi = jumlahnya bertambah 1.</div>'; return; }
+    const list = STATE.products.filter(p=>prodMatchesSearch(p,q)).slice(0,14);
+    if(!list.length){ box.innerHTML = '<div style="font-size:12.5px;color:var(--text-faint);">Tidak ada produk yang cocok.</div>'; return; }
+    box.innerHTML = list.map(p=>{
+      const sub = [brandOf(p), p.categories?.name].filter(Boolean).join(' · ');
+      const head = `<div style="font-weight:600;font-size:13px;">${esc(p.name)} <span style="font-weight:400;color:var(--text-faint);font-size:11.5px;">${esc(sub)}</span></div>`;
+      if(isPcsBulk(p)) return `<div style="padding:7px 0;border-bottom:1px solid var(--border);">${head}<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px;">${optsOf(p).map((o,i)=>`<button type="button" class="btn btn-ghost" data-opadd="${p.id}" data-oplabel="${esc(o.label)}" style="padding:4px 10px;">+ ${esc(o.label)}</button>`).join('')}</div></div>`;
+      return `<div data-opadd="${p.id}" data-oplabel="" style="padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer;">${head}</div>`;
+    }).join('');
+    box.querySelectorAll('[data-opadd]').forEach(b=>b.onclick=()=>{ const p = STATE.products.find(x=>String(x.id)===b.dataset.opadd); if(p) addOpening(p, b.dataset.oplabel||null); });
+  }
+  async function loadHist(){
+    const box = document.getElementById('opHist');
+    const since = new Date(); since.setDate(since.getDate()-45);
+    const r = await branchQ(sb.from('openings').select('opened_date, qty').gte('opened_date', localDateStr(since)).order('opened_date',{ascending:false}));
+    if(r.error){ box.innerHTML=''; return; }
+    const by = {};
+    (r.data||[]).forEach(x=>{ const b = by[x.opened_date] || (by[x.opened_date]={n:0,q:0}); b.n++; b.q+=Number(x.qty||0); });
+    const dates = Object.keys(by).sort().reverse();
+    box.innerHTML = dates.length ? dates.map(d=>`<div data-opday="${d}" style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer;${d===STATE.openDate?'font-weight:700;':''}"><span>${fmtDate(d+'T12:00:00')}</span><span style="color:var(--text-faint);">${by[d].n} jenis · ${by[d].q} item</span></div>`).join('') : '<div style="color:var(--text-faint);">Belum ada catatan.</div>';
+    box.querySelectorAll('[data-opday]').forEach(b=>b.onclick=()=>{ STATE.openDate=b.dataset.opday; document.getElementById('opDate').value=STATE.openDate; loadDay().then(loadHist); });
+  }
+  document.getElementById('opDate').onchange = e=>{ STATE.openDate = e.target.value || localDateStr(); loadDay().then(loadHist); };
+  document.getElementById('opToday').onclick = ()=>{ STATE.openDate = localDateStr(); document.getElementById('opDate').value = STATE.openDate; loadDay().then(loadHist); };
+  document.getElementById('opSearch').oninput = drawResults;
+  drawResults();
+  if(await loadDay()) loadHist(); else document.getElementById('opHist').innerHTML='';
 }
 
 /* ---------------- INIT ---------------- */
