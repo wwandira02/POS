@@ -249,34 +249,50 @@ function wordsClose(a,b){
   return dist <= (maxLen>=7?2:1);
 }
 /* Bangun daftar "kata kunci" dari semua produk aktif (termasuk tiap varian curah + alias suara manual) utk dicocokkan dgn ucapan. */
+/* Token terpisah per produk: nama(+varian), alias suara, merek, kategori -> dipakai utk skor pencocokan. */
+function voiceExtra(p, base){
+  return { nameTokens:voiceTokenize(base), aliasTokens:voiceTokenize(p.voice_alias||''), brandTokens:(()=>{ const b=STATE.brands.find(x=>x.id===p.brand_id); return voiceTokenize((b?.name||p.brands?.name||'')+' '+(b?.voice_alias||'')); })(), catTokens:voiceTokenize(p.categories?.name||'') };
+}
+/* Skor: kecocokan penuh nama ATAU alias (mana lebih tinggi). Merek & kategori yg ikut disebut jadi bonus besar,
+   jadi "luxury marlong" menang atas "marlong" merek lain; jumlah kata cocok jadi pemecah seri. */
+function scoreVoiceEntry(e, nameTokens){
+  const close = (arr)=>arr.filter(t=>nameTokens.some(nt=>wordsClose(nt,t))).length;
+  const nameHit = close(e.nameTokens), aliasHit = e.aliasTokens.length ? close(e.aliasTokens) : 0;
+  const nameScore = e.nameTokens.length ? nameHit/e.nameTokens.length : 0;
+  const aliasScore = e.aliasTokens.length ? aliasHit/e.aliasTokens.length : 0;
+  const score = Math.max(nameScore, aliasScore);
+  const hit = nameHit + aliasHit;
+  const bHit = close(e.brandTokens), cHit = close(e.catTokens);
+  const rank = score + hit*0.01 + (score>0 ? bHit*0.5 + cHit*0.3 : 0);
+  return {score, hit, rank};
+}
 function buildVoiceIndex(){
   const idx = [];
   STATE.products.forEach(p=>{
     const alias = p.voice_alias||'';
     if(!p.is_bulk){
-      idx.push({pid:p.id, opt:null, label:p.name, price:Number(p.sell_price)||0, tokens:voiceTokenize(p.name+' '+alias), stockOk:(p.stock>0)});
+      idx.push({pid:p.id, opt:null, label:p.name, price:Number(p.sell_price)||0, tokens:voiceTokenize(p.name+' '+alias), ...voiceExtra(p, p.name), stockOk:(p.stock>0)});
     } else if(isPcsBulk(p)){
       optsOf(p).forEach((o,i)=>{
-        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), stockOk:((Number(o.stock)||0)>0)});
+        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), ...voiceExtra(p, p.name+' '+o.label), stockOk:((Number(o.stock)||0)>0)});
       });
     } else {
       optsOf(p).forEach((o,i)=>{
-        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), stockOk:true});
+        idx.push({pid:p.id, opt:i, label:p.name+' ('+o.label+')', price:Number(o.price)||0, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), ...voiceExtra(p, p.name+' '+o.label), stockOk:true});
       });
     }
   });
   return idx;
 }
 function matchVoiceSegment(seg, idx){
+  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons)\b/gi,'$1 $2');
   const tokens = seg.split(/\s+/).filter(Boolean);
   const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
   const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
-  let best=null, bestScore=0;
+  let best=null, bestScore=0, bestRank=0;
   idx.forEach(e=>{
-    let hit=0;
-    e.tokens.forEach(et=>{ if(nameTokens.some(nt=>wordsClose(nt,et))) hit++; });
-    const score = e.tokens.length ? hit/e.tokens.length : 0;
-    if(hit>0 && score>bestScore){ bestScore=score; best=e; }
+    const r = scoreVoiceEntry(e, nameTokens);
+    if(r.hit>0 && r.rank>bestRank){ bestRank=r.rank; bestScore=r.score; best=e; }
   });
   if(!best || bestScore<0.4) return {raw:seg, matched:false};
   let chosen = best;
@@ -419,26 +435,25 @@ function buildVoiceStockIndex(){
   STATE.products.forEach(p=>{
     const alias = p.voice_alias||'';
     if(!p.is_bulk){
-      idx.push({pid:p.id, opt:null, kind:'unit', label:p.name, unitName:(p.units?.name||'pcs'), tokens:voiceTokenize(p.name+' '+alias)});
+      idx.push({pid:p.id, opt:null, kind:'unit', label:p.name, unitName:(p.units?.name||'pcs'), tokens:voiceTokenize(p.name+' '+alias), ...voiceExtra(p, p.name)});
     } else if(isPcsBulk(p)){
       optsOf(p).forEach((o,i)=>{
-        idx.push({pid:p.id, opt:i, kind:'pcs', label:p.name+' ('+o.label+')', variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias)});
+        idx.push({pid:p.id, opt:i, kind:'pcs', label:p.name+' ('+o.label+')', variantNum: Number(o.price)||null, tokens:voiceTokenize(p.name+' '+o.label+' '+alias), ...voiceExtra(p, p.name+' '+o.label)});
       });
     } else {
-      idx.push({pid:p.id, opt:null, kind:'weight', label:p.name, tokens:voiceTokenize(p.name+' '+alias)});
+      idx.push({pid:p.id, opt:null, kind:'weight', label:p.name, tokens:voiceTokenize(p.name+' '+alias), ...voiceExtra(p, p.name)});
     }
   });
   return idx;
 }
 function matchVoiceStockSegment(seg, idx){
+  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons)\b/gi,'$1 $2');
   const tokens = seg.split(/\s+/).filter(Boolean);
   const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
-  let best=null, bestScore=0;
+  let best=null, bestScore=0, bestRank=0;
   idx.forEach(e=>{
-    let hit=0;
-    e.tokens.forEach(et=>{ if(nameTokens.some(nt=>wordsClose(nt,et))) hit++; });
-    const score = e.tokens.length ? hit/e.tokens.length : 0;
-    if(hit>0 && score>bestScore){ bestScore=score; best=e; }
+    const r = scoreVoiceEntry(e, nameTokens);
+    if(r.hit>0 && r.rank>bestRank){ bestRank=r.rank; bestScore=r.score; best=e; }
   });
   if(!best || bestScore<0.4) return {raw:seg, matched:false};
   const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
@@ -461,7 +476,7 @@ function matchVoiceStockSegment(seg, idx){
         const n = Number(tokens[i]), nx = tokens[i+1]||'';
         if(/^(kg|kilo|kilogram)$/.test(nx)) gram = n*1000;
         else if(/^ons$/.test(nx)) gram = n*100;
-        else if(/^(gram|gr)$/.test(nx)) gram = n*1;
+        else if(/^(gram|gr|g|grm)$/.test(nx)) gram = n*1;
         else gram = n*1000; // tanpa satuan -> dianggap kilogram
       }
     }
@@ -769,6 +784,35 @@ function openCopyToBranch(){
     bg.remove();
     if(res.error){ alert('Gagal menyalin: '+res.error.message); return; }
     alert(rows.length+' produk disalin ke '+(STATE.branches.find(b=>b.id===toId)?.name||'cabang tujuan')+(dup?' ('+dup+' dilewati karena sudah ada)':'')+'.\n\nPindah ke cabang tujuan untuk melihat hasilnya.');
+  };
+}
+
+/* ---------------- ALIAS SUARA MEREK ---------------- */
+function openBrandAliasModal(){
+  if(!STATE.brands.length){ alert('Belum ada merek.'); return; }
+  const bg = modalShell('Alias Suara Merek', `
+    <div style="font-size:12.5px;color:var(--text-dim);margin-bottom:8px;">Isi bunyi yang sering salah didengar mic untuk tiap merek (pisahkan dengan koma). Berlaku untuk <b>semua produk</b> merek itu. Contoh merek Luxury: <i>look suri, luk suri</i>.</div>
+    <div style="max-height:52vh;overflow:auto;">
+      ${STATE.brands.map((b,i)=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <div style="width:34%;font-weight:600;font-size:13px;">${esc(b.name)}</div>
+        <input data-bi="${i}" value="${esc(b.voice_alias||'')}" placeholder="alias suara..." style="flex:1;min-width:0;">
+      </div>`).join('')}
+    </div>
+    <button class="btn btn-primary" id="ba_save" style="width:100%;margin-top:8px;">Simpan</button>`);
+  bg.querySelector('#ba_save').onclick = async ()=>{
+    const btn = bg.querySelector('#ba_save'); btn.disabled=true; btn.textContent='Menyimpan...';
+    let err=null;
+    for(const inp of bg.querySelectorAll('[data-bi]')){
+      const b = STATE.brands[Number(inp.dataset.bi)]; const v = inp.value.trim();
+      if((b.voice_alias||'')===v) continue;
+      const r = await sb.from('brands').update({voice_alias: v||null}).eq('id', b.id);
+      if(r.error){ err = r.error; break; }
+    }
+    if(err){
+      alert('Gagal menyimpan: '+err.message+'\n\nJalankan dulu di Supabase SQL Editor:\nalter table brands add column if not exists voice_alias text;');
+      btn.disabled=false; btn.textContent='Simpan'; return;
+    }
+    bg.remove(); await loadMaster(); alert('Alias merek tersimpan.');
   };
 }
 
@@ -1306,6 +1350,7 @@ function renderProduk(){
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button type="button" class="btn btn-ghost" id="btnCopyList" title="Salin daftar produk & stok">📋 Salin</button>
       ${STATE.activeBranchId && STATE.branches.length>1 ? `<button type="button" class="btn btn-ghost" id="btnCopyBranch" title="Salin produk ke cabang lain">🏬 Salin ke Cabang</button>` : ''}
+      <button type="button" class="btn btn-ghost" id="btnBrandAlias" title="Alias suara untuk merek">🏷️ Alias Merek</button>
       ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnPasteList" title="Tempel daftar dari Notes/Excel">📥 Tempel Daftar</button>` : ''}
       ${STATE.activeBranchId ? `<button type="button" class="btn btn-ghost" id="btnVoiceStock" title="Tambah stok pakai suara">🎤 Tambah Stok</button>` : ''}
       ${STATE.activeBranchId ? `<button class="btn btn-primary" id="btnAddProduk">+ Tambah Produk</button>` : ''}
@@ -1442,6 +1487,7 @@ function renderProduk(){
   document.getElementById('prodSearch').oninput = draw;
   const vsBtn = document.getElementById('btnVoiceStock'); if(vsBtn) vsBtn.onclick = openVoiceStockAdd;
   document.getElementById('btnCopyList').onclick = copyProductList;
+  document.getElementById('btnBrandAlias').onclick = openBrandAliasModal;
   const cbBtn = document.getElementById('btnCopyBranch'); if(cbBtn) cbBtn.onclick = openCopyToBranch;
   const plBtn = document.getElementById('btnPasteList'); if(plBtn) plBtn.onclick = openPasteImport;
   const addBtn = document.getElementById('btnAddProduk'); if(addBtn) addBtn.onclick=()=>openProductModal(null);
