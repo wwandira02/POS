@@ -2383,8 +2383,9 @@ function openingLabel(r){ return [r.brand_name, r.product_name].filter(Boolean).
 async function renderPembukaan(){
   const el = document.getElementById('mainContent');
   if(!STATE.openDate) STATE.openDate = localDateStr();
+  if(STATE.openTab==='stok') return renderStokCatatan();
   const isOwner = STATE.session.staff.role==='owner';
-  el.innerHTML = pageHeader('Pembukaan Barang', 'Catatan barang yang dibuka (tidak mengubah stok)') + `
+  el.innerHTML = pageHeader('Pembukaan Barang', 'Catatan barang yang dibuka (tidak mengubah stok)') + opTabBar() + `
   <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
     <div class="card" style="flex:1 1 340px;min-width:0;padding:16px;">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
@@ -2406,6 +2407,7 @@ async function renderPembukaan(){
       </div>
     </div>
   </div>`;
+  bindOpTabs();
   let rows = [];
   const brandOf = p=> p.brands?.name || STATE.brands.find(b=>b.id===p.brand_id)?.name || '';
   const branchQ = q=> STATE.activeBranchId ? q.eq('branch_id', STATE.activeBranchId) : q;
@@ -2489,6 +2491,187 @@ async function renderPembukaan(){
   document.getElementById('opSearch').oninput = drawResults;
   drawResults();
   if(await loadDay()) loadHist(); else document.getElementById('opHist').innerHTML='';
+}
+
+/* ---------------- CATATAN STOK PAPIR & BUSA (terpisah dari stok POS & dari catatan pembukaan) ---------------- */
+const STOKNOTE_SQL = `create table if not exists stock_notes (
+  id uuid primary key default gen_random_uuid(),
+  branch_id text,
+  note_date date not null,
+  kind text not null,
+  item_name text not null,
+  big numeric default 0,
+  small numeric default 0,
+  sort_order int default 0,
+  staff_name text,
+  created_at timestamptz default now()
+);
+alter table stock_notes disable row level security;
+create index if not exists stock_notes_date_idx on stock_notes(note_date);`;
+const STOK_KINDS = {
+  papir:{title:'Papir', big:'slop', small:'ikat'},
+  busa:{title:'Busa', big:'kg', small:'g'}
+};
+function opTabBar(){
+  const t = STATE.openTab==='stok' ? 'stok' : 'buka';
+  return `<div style="display:flex;gap:8px;margin-bottom:14px;">
+    <button type="button" class="tabbtn ${t==='buka'?'active':''}" data-optab="buka">📭 Pembukaan Barang</button>
+    <button type="button" class="tabbtn ${t==='stok'?'active':''}" data-optab="stok">📦 Stok Papir & Busa</button></div>`;
+}
+function bindOpTabs(){
+  document.querySelectorAll('[data-optab]').forEach(b=>b.onclick=()=>{ STATE.openTab = b.dataset.optab; renderPembukaan(); });
+}
+function stokText(kind, big, small){
+  const k = STOK_KINDS[kind], parts = [];
+  if(Number(big)) parts.push(Number(big)+' '+k.big);
+  if(Number(small)) parts.push(Number(small)+' '+k.small);
+  return parts.join(' + ') || '0';
+}
+/* Baca catatan teks seperti "Stok papir 2 nov / - marlong 1 slop + 2 ikat / Busa / - m 1kg + 440g". */
+function parseStokNote(text){
+  const MON = {jan:1,feb:2,mar:3,apr:4,mei:5,jun:6,jul:7,agu:8,agt:8,sep:9,okt:10,nov:11,des:12};
+  const lines = String(text||'').replace(/[\u2060\u200b\u200e\u200f\ufeff]/g,'').replace(/\u00a0/g,' ').split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const out = {papir:[], busa:[]}; let kind = null, date = null;
+  lines.forEach(l=>{
+    const isItem = /^[-•*·]/.test(l);
+    if(!isItem && /papir/i.test(l)) kind = 'papir';
+    else if(!isItem && /^busa/i.test(l)) kind = 'busa';
+    if(!isItem && (/papir|busa/i.test(l))){
+      const m = l.match(/(\d{1,2})\s*(jan|feb|mar|apr|mei|jun|jul|agu|agt|sep|okt|nov|des)\w*(?:\s*(\d{4}))?/i);
+      if(m && !date){ const y = m[3] || String(new Date().getFullYear()); date = y+'-'+String(MON[m[2].toLowerCase()]).padStart(2,'0')+'-'+String(m[1]).padStart(2,'0'); }
+      return;
+    }
+    if(!kind || !isItem) return;
+    const body = l.replace(/^[-•*·\s]+/,'');
+    const di = body.search(/\d/);
+    const name = (di<0 ? body : body.slice(0,di)).replace(/[:=\-–\s]+$/,'').trim();
+    if(!name) return;
+    let big=0, small=0;
+    if(di>=0){
+      const re = /(\d+(?:[.,]\d+)?)\s*(slop|slp|ikat|kilogram|kilo|kg|gram|gr|g)?/gi; let m;
+      while((m = re.exec(body.slice(di)))){
+        const n = parseFloat(m[1].replace(',','.')); const u = (m[2]||'').toLowerCase();
+        if(kind==='papir'){ if(u==='ikat') small+=n; else big+=n; }
+        else { if(/^(kg|kilo|kilogram)$/.test(u)) big+=n; else small+=n; } // busa tanpa satuan dianggap gram
+      }
+    }
+    out[kind].push({name, big, small});
+  });
+  return {rows:out, date};
+}
+async function renderStokCatatan(){
+  const el = document.getElementById('mainContent');
+  if(!STATE.stokDate) STATE.stokDate = localDateStr();
+  el.innerHTML = pageHeader('Stok Papir & Busa', 'Catatan stok harian — terpisah dari stok POS dan catatan pembukaan') + opTabBar() + `
+  <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;">
+    <div class="card" style="flex:2 1 420px;min-width:0;padding:16px;">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+        <input type="date" id="skDate" value="${STATE.stokDate}" style="flex:1;min-width:140px;">
+        <button type="button" class="btn btn-ghost" id="skToday">Hari ini</button>
+        <button type="button" class="btn btn-ghost" id="skPaste">📥 Tempel Catatan</button>
+        <button type="button" class="btn btn-ghost" id="skPrev">↩ Salin dari terakhir</button>
+      </div>
+      <div id="skBody">Memuat...</div>
+      <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+        <button class="btn btn-primary" id="skSave" style="flex:1;">Simpan Catatan</button>
+        <button type="button" class="btn btn-ghost" id="skCopy">📋 Salin</button>
+      </div>
+    </div>
+    <div class="card" style="flex:1 1 260px;min-width:0;padding:16px;">
+      <div style="font-weight:700;margin-bottom:8px;">Tanggal yang sudah dicatat</div>
+      <div id="skHist" style="font-size:13px;">Memuat...</div>
+    </div>
+  </div>`;
+  bindOpTabs();
+  let draft = {papir:[], busa:[]};
+  const branchQ = q=> STATE.activeBranchId ? q.eq('branch_id', STATE.activeBranchId) : q;
+  const sqlHint = ()=>`<div style="font-size:12.5px;color:var(--danger,#dc2626);">Tabel <b>stock_notes</b> belum ada. Jalankan SQL ini sekali di Supabase → SQL Editor:</div><textarea readonly style="width:100%;height:190px;font-size:11px;margin-top:6px;">${esc(STOKNOTE_SQL)}</textarea>`;
+  const num = v=>{ const n = parseFloat(String(v).replace(',','.')); return isNaN(n)?0:n; };
+
+  function drawBody(){
+    document.getElementById('skBody').innerHTML = Object.keys(STOK_KINDS).map(kind=>{
+      const k = STOK_KINDS[kind];
+      return `<div style="margin-bottom:14px;">
+        <div style="font-weight:700;margin-bottom:6px;">${k.title} <span style="font-weight:400;font-size:12px;color:var(--text-faint);">(${k.big} + ${k.small})</span></div>
+        ${draft[kind].map((r,i)=>`<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">
+          <input data-skn="${kind}:${i}" value="${esc(r.name)}" placeholder="nama" style="flex:1;min-width:0;">
+          <input data-skb="${kind}:${i}" type="number" inputmode="decimal" step="any" min="0" value="${r.big||''}" placeholder="${k.big}" style="width:74px;text-align:center;">
+          <input data-sks="${kind}:${i}" type="number" inputmode="decimal" step="any" min="0" value="${r.small||''}" placeholder="${k.small}" style="width:74px;text-align:center;">
+          <button type="button" class="btn btn-ghost" data-skx="${kind}:${i}" style="padding:4px 8px;">✕</button></div>`).join('') || '<div style="font-size:12.5px;color:var(--text-faint);margin-bottom:6px;">Belum ada baris.</div>'}
+        <button type="button" class="btn btn-ghost" data-skadd="${kind}">+ Tambah baris ${k.title.toLowerCase()}</button>
+      </div>`;
+    }).join('');
+    const box = document.getElementById('skBody');
+    const at = v=>{ const [kd,i]=v.split(':'); return draft[kd][Number(i)]; };
+    box.querySelectorAll('[data-skn]').forEach(e=>e.oninput=()=>{ at(e.dataset.skn).name = e.value; });
+    box.querySelectorAll('[data-skb]').forEach(e=>e.oninput=()=>{ at(e.dataset.skb).big = num(e.value); });
+    box.querySelectorAll('[data-sks]').forEach(e=>e.oninput=()=>{ at(e.dataset.sks).small = num(e.value); });
+    box.querySelectorAll('[data-skx]').forEach(b=>b.onclick=()=>{ const [kd,i]=b.dataset.skx.split(':'); draft[kd].splice(Number(i),1); drawBody(); });
+    box.querySelectorAll('[data-skadd]').forEach(b=>b.onclick=()=>{ draft[b.dataset.skadd].push({name:'',big:0,small:0}); drawBody(); const ins = box.querySelectorAll('[data-skn^="'+b.dataset.skadd+':"]'); if(ins.length) ins[ins.length-1].focus(); });
+  }
+  async function loadDate(){
+    const r = await branchQ(sb.from('stock_notes').select('*').eq('note_date', STATE.stokDate).order('sort_order'));
+    if(r.error){ document.getElementById('skBody').innerHTML = sqlHint(); return false; }
+    draft = {papir:[], busa:[]};
+    (r.data||[]).forEach(x=>{ if(draft[x.kind]) draft[x.kind].push({name:x.item_name, big:Number(x.big)||0, small:Number(x.small)||0}); });
+    drawBody(); return true;
+  }
+  async function loadHist(){
+    const box = document.getElementById('skHist');
+    const r = await branchQ(sb.from('stock_notes').select('note_date').order('note_date',{ascending:false}).limit(600));
+    if(r.error){ box.innerHTML=''; return; }
+    const by = {}; (r.data||[]).forEach(x=>{ by[x.note_date]=(by[x.note_date]||0)+1; });
+    const dates = Object.keys(by).sort().reverse().slice(0,40);
+    box.innerHTML = dates.length ? dates.map(d=>`<div data-skday="${d}" style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border);cursor:pointer;${d===STATE.stokDate?'font-weight:700;':''}"><span>${fmtDate(d+'T12:00:00')}</span><span style="color:var(--text-faint);">${by[d]} baris</span></div>`).join('') : '<div style="color:var(--text-faint);">Belum ada catatan.</div>';
+    box.querySelectorAll('[data-skday]').forEach(b=>b.onclick=()=>{ STATE.stokDate=b.dataset.skday; document.getElementById('skDate').value=STATE.stokDate; loadDate().then(loadHist); });
+  }
+  document.getElementById('skDate').onchange = e=>{ STATE.stokDate = e.target.value || localDateStr(); loadDate().then(loadHist); };
+  document.getElementById('skToday').onclick = ()=>{ STATE.stokDate = localDateStr(); document.getElementById('skDate').value = STATE.stokDate; loadDate().then(loadHist); };
+  document.getElementById('skPrev').onclick = async ()=>{
+    const r = await branchQ(sb.from('stock_notes').select('note_date').neq('note_date', STATE.stokDate).order('note_date',{ascending:false}).limit(1));
+    if(r.error || !(r.data||[]).length){ alert('Belum ada catatan di tanggal lain untuk disalin.'); return; }
+    const d = r.data[0].note_date;
+    const rr = await branchQ(sb.from('stock_notes').select('*').eq('note_date', d).order('sort_order'));
+    draft = {papir:[], busa:[]};
+    (rr.data||[]).forEach(x=>{ if(draft[x.kind]) draft[x.kind].push({name:x.item_name, big:Number(x.big)||0, small:Number(x.small)||0}); });
+    drawBody(); alert('Disalin dari '+fmtDate(d+'T12:00:00')+'. Ubah angkanya yang berubah, lalu tekan Simpan Catatan.');
+  };
+  document.getElementById('skPaste').onclick = ()=>{
+    const bg = modalShell('Tempel Catatan Stok', `
+      <div style="font-size:12.5px;color:var(--text-dim);margin-bottom:6px;">Tempel catatan seperti di Notes. Judul "Stok papir 2 nov" dan "Busa" dikenali otomatis. Satuan papir: slop / ikat. Busa: kg / g (angka tanpa satuan dianggap gram).</div>
+      <textarea id="skText" rows="12" style="width:100%;font-family:inherit;" placeholder="Stok papir 2 nov&#10;- marlong 1 slop + 2 ikat&#10;- surya 5 slop&#10;Busa&#10;- R 2kg&#10;- m 1kg + 440g"></textarea>
+      <button class="btn btn-primary" id="skGo" style="width:100%;margin-top:8px;">Baca Catatan</button>`);
+    bg.querySelector('#skGo').onclick = ()=>{
+      const res = parseStokNote(bg.querySelector('#skText').value);
+      const np = res.rows.papir.length, nb = res.rows.busa.length;
+      if(!np && !nb){ alert('Tidak ada baris yang terbaca. Pastikan ada judul "papir" / "busa" dan baris diawali tanda "-".'); return; }
+      if(np) draft.papir = res.rows.papir;
+      if(nb) draft.busa = res.rows.busa;
+      if(res.date){ STATE.stokDate = res.date; document.getElementById('skDate').value = res.date; }
+      bg.remove(); drawBody();
+      alert('Terbaca '+np+' papir dan '+nb+' busa'+(res.date?' untuk tanggal '+fmtDate(res.date+'T12:00:00'):'')+'. Cek dulu, lalu tekan Simpan Catatan.');
+    };
+  };
+  document.getElementById('skCopy').onclick = ()=>{
+    const out = ['Stok papir '+fmtDate(STATE.stokDate+'T12:00:00')];
+    const sec = kind=> draft[kind].filter(r=>r.name.trim()).map(r=>'- '+r.name.trim()+' '+stokText(kind,r.big,r.small));
+    out.push(...sec('papir'), '', 'Busa', ...sec('busa'));
+    copyText(out.join('\n')).then(()=>alert('Catatan disalin.')).catch(()=>alert('Gagal menyalin.'));
+  };
+  document.getElementById('skSave').onclick = async ()=>{
+    if(!STATE.activeBranchId){ alert('Pilih cabang dulu (bukan "Semua Cabang") untuk menyimpan.'); return; }
+    const btn = document.getElementById('skSave'); btn.disabled = true; btn.textContent = 'Menyimpan...';
+    const old = await branchQ(sb.from('stock_notes').select('id').eq('note_date', STATE.stokDate));
+    if(old.error){ alert('Gagal: '+old.error.message); btn.disabled=false; btn.textContent='Simpan Catatan'; return; }
+    const rows = []; let order = 0;
+    Object.keys(STOK_KINDS).forEach(kind=>draft[kind].forEach(r=>{ if(r.name.trim()) rows.push({branch_id:String(STATE.activeBranchId), note_date:STATE.stokDate, kind, item_name:r.name.trim(), big:r.big||0, small:r.small||0, sort_order:order++, staff_name:STATE.session.staff.name}); }));
+    if(rows.length){ const ins = await sb.from('stock_notes').insert(rows); if(ins.error){ alert('Gagal menyimpan: '+ins.error.message); btn.disabled=false; btn.textContent='Simpan Catatan'; return; } }
+    const ids = (old.data||[]).map(x=>x.id); // hapus versi lama setelah yang baru berhasil masuk
+    if(ids.length) await sb.from('stock_notes').delete().in('id', ids);
+    btn.disabled=false; btn.textContent='Simpan Catatan';
+    await loadDate(); loadHist(); alert('Catatan stok tersimpan.');
+  };
+  if(await loadDate()) loadHist(); else document.getElementById('skHist').innerHTML='';
 }
 
 /* ---------------- INIT ---------------- */
