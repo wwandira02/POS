@@ -251,7 +251,7 @@ function wordsClose(a,b){
 /* Bangun daftar "kata kunci" dari semua produk aktif (termasuk tiap varian curah + alias suara manual) utk dicocokkan dgn ucapan. */
 /* Token terpisah per produk: nama(+varian), alias suara, merek, kategori -> dipakai utk skor pencocokan. */
 function voiceExtra(p, base){
-  return { nameTokens:voiceTokenize(base), aliasTokens:voiceTokenize(p.voice_alias||''), brandTokens:(()=>{ const b=STATE.brands.find(x=>x.id===p.brand_id); return voiceTokenize((b?.name||p.brands?.name||'')+' '+(b?.voice_alias||'')); })(), catTokens:voiceTokenize(p.categories?.name||'') };
+  return { brandName:(STATE.brands.find(x=>x.id===p.brand_id)?.name||p.brands?.name||''), baseName:p.name, catName:(p.categories?.name||''), nameTokens:voiceTokenize(base), aliasTokens:voiceTokenize(p.voice_alias||''), brandTokens:(()=>{ const b=STATE.brands.find(x=>x.id===p.brand_id); return voiceTokenize((b?.name||p.brands?.name||'')+' '+(b?.voice_alias||'')); })(), catTokens:voiceTokenize(p.categories?.name||'') };
 }
 /* Skor: kecocokan penuh nama ATAU alias (mana lebih tinggi). Merek & kategori yg ikut disebut jadi bonus besar,
    jadi "luxury marlong" menang atas "marlong" merek lain; jumlah kata cocok jadi pemecah seri. */
@@ -284,17 +284,38 @@ function buildVoiceIndex(){
   });
   return idx;
 }
+/* Teks tampilan: "Jayana Samsu" (merek + nama), supaya jelas produk yang mana. */
+function voiceDisp(e){ return (e.brandName ? e.brandName+' ' : '') + (e.label||''); }
+/* Kolam produk mirip (selisih skor kecil) utk dipilih ulang user. */
+function buildVoicePool(cands, best, bestRank){
+  const seen = new Set(), pool = [];
+  [{e:best,rank:bestRank,score:1}, ...cands.sort((a,b)=>b.rank-a.rank)].forEach(c=>{
+    const k = String(c.e.pid);
+    if(seen.has(k)) return;
+    if(c.e!==best && !(c.score>=0.4 && c.rank>=bestRank-0.45)) return;
+    seen.add(k);
+    pool.push({pid:c.e.pid, label:(c.e.brandName?c.e.brandName+' ':'')+(c.e.baseName||c.e.label)+(c.e.catName?' · '+c.e.catName:'')});
+  });
+  return pool.slice(0,6);
+}
+function poolSelect(s,i){
+  if(!s.pool || s.pool.length<2) return '';
+  return `<div style="font-size:11px;color:#d97706;margin-top:3px;">⚠ Ada ${s.pool.length} produk mirip — pastikan yang benar:</div>
+    <select data-alt="${i}" style="width:100%;margin-top:3px;font-size:12px;">${s.pool.map(o=>`<option value="${esc(String(o.pid))}" ${String(o.pid)===String(s.pid)?'selected':''}>${esc(o.label)}</option>`).join('')}</select>`;
+}
 function matchVoiceSegment(seg, idx){
-  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons)\b/gi,'$1 $2');
+  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons|on)\b/gi,'$1 $2');
   const tokens = seg.split(/\s+/).filter(Boolean);
   const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
   const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
-  let best=null, bestScore=0, bestRank=0;
+  let best=null, bestScore=0, bestRank=0; const cands=[];
   idx.forEach(e=>{
     const r = scoreVoiceEntry(e, nameTokens);
+    if(r.hit>0) cands.push({e, rank:r.rank, score:r.score});
     if(r.hit>0 && r.rank>bestRank){ bestRank=r.rank; bestScore=r.score; best=e; }
   });
   if(!best || bestScore<0.4) return {raw:seg, matched:false};
+  const pool = buildVoicePool(cands, best, bestRank);
   let chosen = best;
   const sameProductOpts = idx.filter(e=>e.pid===best.pid && e.opt!=null);
   if(sameProductOpts.length>1 && numTokens.length){
@@ -308,7 +329,7 @@ function matchVoiceSegment(seg, idx){
   const priceLikeNums = numTokens.filter(n=>n>=100);
   const qtyCandidates = numTokens.filter(n=>n>=1 && n<=50 && !priceLikeNums.includes(n));
   const qty = qtyCandidates.length ? qtyCandidates[qtyCandidates.length-1] : 1;
-  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, label:chosen.label, price:chosen.price, qty, stockOk:chosen.stockOk};
+  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, label:voiceDisp(chosen), price:chosen.price, qty, stockOk:chosen.stockOk, pool};
 }
 function parseVoiceSegments(transcript){
   const norm = normalizeSpokenNumbers(transcript);
@@ -380,7 +401,7 @@ function openVoiceAddToCart(){
       if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
       return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
         <div style="flex:1;min-width:0;">
-          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>${poolSelect(s,i)}
           <div style="font-size:11px;color:var(--text-faint);">${fmtIDR(s.price)}${s.stockOk===false?' · <span style="color:var(--danger,#dc2626);">stok habis</span>':''}</div>
         </div>
         <input type="number" min="1" value="${s.qty}" data-qty="${i}" style="width:54px;padding:5px;text-align:center;">
@@ -388,6 +409,11 @@ function openVoiceAddToCart(){
       </div>`;
     }).join('') || `<p style="color:var(--text-faint);font-size:13px;text-align:center;">Belum ada produk. Tekan tombol mic lalu sebutkan 1 produk.</p>`;
     list.querySelectorAll('[data-qty]').forEach(el=>el.onchange=()=>{ segs[el.dataset.qty].qty = Math.max(1, Number(el.value)||1); });
+    list.querySelectorAll('[data-alt]').forEach(el=>el.onchange=()=>{
+      const i = Number(el.dataset.alt), old = segs[i];
+      const ns = matchVoiceSegment(old.raw, buildVoiceIndex().filter(e=>String(e.pid)===el.value));
+      if(ns.matched){ ns.pool = old.pool; ns.qty = old.qty; segs[i] = ns; draw(); }
+    });
     list.querySelectorAll('[data-rm]').forEach(el=>el.onclick=()=>{ segs.splice(Number(el.dataset.rm),1); draw(); });
   }
   draw();
@@ -447,15 +473,17 @@ function buildVoiceStockIndex(){
   return idx;
 }
 function matchVoiceStockSegment(seg, idx){
-  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons)\b/gi,'$1 $2');
+  seg = seg.replace(/(\d)\s*(kilogram|kilo|kg|gram|gr|g|ons|on)\b/gi,'$1 $2');
   const tokens = seg.split(/\s+/).filter(Boolean);
   const nameTokens = tokens.filter(t=>!/^\d+$/.test(t) && t.length>1);
-  let best=null, bestScore=0, bestRank=0;
+  let best=null, bestScore=0, bestRank=0; const cands=[];
   idx.forEach(e=>{
     const r = scoreVoiceEntry(e, nameTokens);
+    if(r.hit>0) cands.push({e, rank:r.rank, score:r.score});
     if(r.hit>0 && r.rank>bestRank){ bestRank=r.rank; bestScore=r.score; best=e; }
   });
   if(!best || bestScore<0.4) return {raw:seg, matched:false};
+  const pool = buildVoicePool(cands, best, bestRank);
   const numTokens = tokens.filter(t=>/^\d+$/.test(t)).map(Number);
   let chosen = best, delta = 0, unitLabel = '';
   if(best.kind==='pcs'){
@@ -475,7 +503,7 @@ function matchVoiceStockSegment(seg, idx){
       if(/^\d+$/.test(tokens[i])){
         const n = Number(tokens[i]), nx = tokens[i+1]||'';
         if(/^(kg|kilo|kilogram)$/.test(nx)) gram = n*1000;
-        else if(/^ons$/.test(nx)) gram = n*100;
+        else if(/^(ons|on|onz)$/.test(nx)) gram = n*100;
         else if(/^(gram|gr|g|grm)$/.test(nx)) gram = n*1;
         else gram = n*1000; // tanpa satuan -> dianggap kilogram
       }
@@ -486,7 +514,7 @@ function matchVoiceStockSegment(seg, idx){
     unitLabel = best.unitName;
   }
   // produk dikenali tapi jumlah tidak disebut -> tetap tampil sbg produk (jumlah diisi manual di daftar), bukan "tidak dikenali"
-  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, kind:best.kind, label:chosen.label, delta:(delta>0?delta:0), unitLabel};
+  return {raw:seg, matched:true, pid:chosen.pid, opt:chosen.opt, kind:best.kind, label:voiceDisp(chosen), delta:(delta>0?delta:0), unitLabel, pool};
 }
 function parseVoiceStockSegments(transcript){
   const norm = normalizeSpokenNumbers(transcript);
@@ -512,7 +540,7 @@ function openVoiceStockAdd(){
       if(!s.matched) return `<div style="padding:8px;border:1px dashed var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;color:var(--text-faint);display:flex;justify-content:space-between;align-items:center;gap:8px;">❓ Tidak dikenali: "${esc(s.raw)}"<button type="button" class="btn btn-ghost" data-rm="${i}" style="padding:3px 8px;">✕</button></div>`;
       return `<div style="display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;">
         <div style="flex:1;min-width:0;">
-          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>
+          <div style="font-weight:600;font-size:13px;">${esc(s.label)}</div>${poolSelect(s,i)}
           ${s.delta>0 ? `<div style="font-size:11px;color:var(--text-faint);">+${fmtVoiceDelta(s)}</div>` : `<div style="font-size:11px;color:#d97706;">Jumlah belum disebut — isi di kanan</div>`}
         </div>
         ${s.delta>0 ? '' : `<input type="number" inputmode="decimal" min="0" step="any" data-dq="${i}" placeholder="Jumlah" style="width:76px;padding:5px;text-align:center;">${s.kind==='weight'?`<select data-du="${i}" style="width:68px;"><option value="1000">kg</option><option value="100">ons</option><option value="1">gram</option></select>`:''}`}
@@ -525,6 +553,11 @@ function openVoiceStockAdd(){
       segs[i].delta = Math.max(0, Math.round((Number(q.value)||0) * (u ? Number(u.value) : 1)));
     };
     list.querySelectorAll('[data-dq]').forEach(el=>el.oninput=()=>setDq(el.dataset.dq));
+    list.querySelectorAll('[data-alt]').forEach(el=>el.onchange=()=>{
+      const i = Number(el.dataset.alt), old = segs[i];
+      const ns = matchVoiceStockSegment(old.raw, buildVoiceStockIndex().filter(e=>String(e.pid)===el.value));
+      if(ns.matched){ ns.pool = old.pool; segs[i] = ns; draw(); }
+    });
     list.querySelectorAll('[data-du]').forEach(el=>el.onchange=()=>setDq(el.dataset.du));
   }
   draw();
